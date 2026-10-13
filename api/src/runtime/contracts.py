@@ -16,9 +16,10 @@ class RuntimeState(StrEnum):
 class ResourceRequests:
     cpu_cores: float | None = None
     memory_bytes: int | None = None
+    pids_limit: int | None = None
 
     def __post_init__(self):
-        if any(value is not None and value <= 0 for value in (self.cpu_cores, self.memory_bytes)):
+        if any(value is not None and value <= 0 for value in (self.cpu_cores, self.memory_bytes, self.pids_limit)):
             raise ValueError("Resource requests must be positive")
 
 
@@ -85,4 +86,8 @@ class RuntimeProvider(Protocol):
 
     async def destroy(self, runtime_id: str) -> None:
         """Stop and remove provider-owned environment; idempotent."""
+        ...
+
+    async def close(self) -> None:
+        """Reclaim all owned allocations, including failed provisioning attempts."""
         ...

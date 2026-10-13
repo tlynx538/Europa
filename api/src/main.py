@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -7,7 +8,9 @@ from fastapi.responses import JSONResponse
 from internal.middleware import debug_middleware
 from internal.router import router
 from kernel.gateway_client import GatewayError
-from runtime.contracts import GatewayEndpoint, RuntimeErrorBase
+from runtime.contracts import GatewayEndpoint, ResourceRequests, RuntimeErrorBase
+from runtime.containerd import ContainerdConfig, ContainerdRuntimeProvider
+from runtime.containerd_backend import SDKBridgeBackend
 from runtime.local import LocalRuntimeProvider
 from runtime.supervisor import RuntimeSupervisor
 
@@ -18,8 +21,27 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
     async def lifespan(app):
         url = gateway_url or os.environ.get("EUROPA_GATEWAY_URL")
         token = gateway_token or os.environ.get("EUROPA_GATEWAY_TOKEN", "")
-        provider = runtime_provider or LocalRuntimeProvider()
-        supervisor = RuntimeSupervisor({"local": provider})
+        selection = os.environ.get("EUROPA_RUNTIME_PROVIDER", "local")
+        resources = None
+        if runtime_provider is not None:
+            provider = runtime_provider
+            selection = "local"
+        elif selection == "local":
+            provider = LocalRuntimeProvider()
+        elif selection == "containerd":
+            if os.environ.get("EUROPA_CONTAINERD_ALLOW_NETWORK") != "1":
+                raise RuntimeErrorBase("Containerd networking requires explicit operator opt-in")
+            resources = ResourceRequests(float(os.environ["EUROPA_CONTAINERD_CPU_CORES"]),
+                int(os.environ["EUROPA_CONTAINERD_MEMORY_BYTES"]), int(os.environ["EUROPA_CONTAINERD_PIDS_LIMIT"]))
+            backend = SDKBridgeBackend(Path(os.environ["EUROPA_CONTAINERD_BRIDGE"]),
+                socket=os.environ.get("EUROPA_CONTAINERD_SOCKET", "/run/containerd/containerd.sock"),
+                cni_config=os.environ["EUROPA_CONTAINERD_CNI_CONFIG"])
+            provider = ContainerdRuntimeProvider(backend, ContainerdConfig(
+                os.environ["EUROPA_CONTAINERD_IMAGE"], os.environ.get("EUROPA_CONTAINERD_HANDLER", "runsc")))
+        else:
+            raise RuntimeErrorBase("Unknown runtime provider selection")
+        supervisor = RuntimeSupervisor({selection: provider}, default_provider=selection,
+                                       default_resources=resources)
         app.state.supervisor = supervisor
         try:
             if url:

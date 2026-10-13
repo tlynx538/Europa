@@ -11,8 +11,11 @@ from runtime.contracts import (
 
 
 class RuntimeSupervisor:
-    def __init__(self, providers: dict[str, RuntimeProvider]):
+    def __init__(self, providers: dict[str, RuntimeProvider], *, default_provider="local",
+                 default_resources=None):
         self.providers = providers
+        self.default_provider = default_provider
+        self.default_resources = default_resources
         self.handles: dict[str, RuntimeHandle] = {}
         self.notebooks: dict[str, str] = {}
         self._clients: dict[str, GatewayClient] = {}
@@ -104,7 +107,8 @@ class RuntimeSupervisor:
         return status
 
     async def client_for(self, notebook_id="default"):
-        handle = await self.ensure(RuntimeSpec(notebook_id))
+        handle = await self.ensure(RuntimeSpec(notebook_id, provider=self.default_provider,
+                                              resources=self.default_resources))
         return self._clients[handle.runtime_id]
 
     async def destroy_notebook(self, notebook_id):
@@ -149,6 +153,13 @@ class RuntimeSupervisor:
         for notebook_id in tuple(self._locks):
             try:
                 await self.destroy_notebook(notebook_id)
+            except Exception as exc:
+                failures.append(exc)
+        # Provisioning can fail before returning a handle to the notebook registry.
+        # Providers retain those partial allocations and must retry them at shutdown.
+        for provider in self.providers.values():
+            try:
+                await provider.close()
             except Exception as exc:
                 failures.append(exc)
         if failures:

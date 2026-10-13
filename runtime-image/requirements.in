@@ -1,0 +1,4 @@
+jupyter-kernel-gateway==3.0.1
+jupyter-server==2.17.0
+jupyter-client==8.6.3
+ipykernel==6.30.1

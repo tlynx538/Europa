@@ -1,0 +1,11 @@
+{
+  "cniVersion": "1.0.0",
+  "name": "europa-private",
+  "plugins": [{
+    "type": "bridge",
+    "bridge": "europa0",
+    "isGateway": true,
+    "ipMasq": false,
+    "ipam": {"type": "host-local", "ranges": [[{"subnet": "10.77.0.0/16"}]]}
+  }]
+}

@@ -25,6 +25,8 @@ TIMINGS = []
 def pytest_addoption(parser):
     parser.addoption("--run-local-gateway", action="store_true",
                      help="Run trusted kernels locally (development-only; no container isolation)")
+    parser.addoption("--run-containerd", action="store_true",
+                     help="Use operator-approved disposable Linux containerd/CNI resources")
 
 
 def pytest_collection_modifyitems(config, items):

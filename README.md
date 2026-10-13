@@ -4,14 +4,16 @@ Europa exposes an application API backed by **Jupyter Kernel Gateway 3.0.1**, us
 the documented `kernel_gateway.jupyter_websocket` personality and standard
 `ipykernel`. Gateway owns kernel processes and the Jupyter-to-WebSocket bridge.
 The Gateway client uses only HTTP and WebSocket APIs; it has no Jupyter process
-manager, ZeroMQ reader, or custom kernel wrapper. A separate asynchronous local
-runtime provider now owns Gateway subprocesses and their development environments.
+manager, ZeroMQ reader, or custom kernel wrapper. Runtime providers own either
+development subprocesses or containerd tasks through a separate provisioning layer.
 
-This milestone is **local development only**. A virtual environment and temporary
+Validation on this host covers **trusted local development** and mocked containerd
+behavior. Real container isolation remains unverified. A virtual environment and temporary
 working directory do not isolate hostile Python from the host. Execute trusted
 code only. Gateway and Europa are bound to `127.0.0.1`; Gateway authentication is
 mandatory. Europa has no end-user authentication and must remain on loopback.
-No container orchestration, prewarming, MCP, or frontend is implemented.
+The containerd adapter is opt-in and requires approved Linux infrastructure.
+No prewarming, MCP, or frontend is implemented.
 
 ## Reproducible environment
 
@@ -189,6 +191,13 @@ References:
 - [Jupyter Server REST and Contents APIs](https://jupyter-server.readthedocs.io/en/stable/developers/rest-api.html)
 - [WebSocket protocols](https://jupyter-server.readthedocs.io/en/stable/developers/websocket-protocols.html)
 
-See `docs/phase2-review.md` for actual results and limitations. Original code remains
+Step 2B adds an opt-in containerd provider using the supported Go SDK and native
+`runc`/`runsc` handlers. Local development remains the default. See
+[containerd provider review](docs/containerd-provider.md) for configuration, the
+digest-pinned Gateway image, actual tests and benchmarks, and Linux prerequisites.
+Real container tests are explicitly skipped on the current macOS host; container
+isolation has not been validated. No warm pool or MCP integration is included.
+
+See `docs/phase2-review.md` for migration results and limitations. Original code remains
 at Git commit `c35de54ebdb282799c58239230f7e09e4c7f6680`.
 `docs/modularOverview.png` is historical, not the current architecture.
