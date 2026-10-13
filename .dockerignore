@@ -1,8 +1,10 @@
+.git/
+.venv/
 env/
+.env
+**/.env
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+test-results/
 .DS_Store
-LICENSE
-README.md
-api/src/**/__pycache__/
-api/.env
-api/visual_models/
-api/README.md

@@ -11,7 +11,7 @@ async def debug_middleware(request: Request, call_next):
     """Debug middleware to log request/response timing"""
     start_time = time.time()
     
-    logger.info(f"Request: {request.method} {request.url}")
+    logger.info("Request: %s %s", request.method, request.url.path)
     
     try:
         response = await call_next(request)

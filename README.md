@@ -1,34 +1,155 @@
-# Europa Jupyter REST API
+# Europa: FastAPI + Jupyter Kernel Gateway
 
-This REST API can
-- provision an ipython kernel
-- execute code on the kernel 
-- maintain state of kernel during execution
-  
-The Main Goal of this API is to run python code via REST API.
+Europa exposes an application API backed by **Jupyter Kernel Gateway 3.0.1**, using
+the documented `kernel_gateway.jupyter_websocket` personality and standard
+`ipykernel`. Gateway owns kernel processes and the Jupyter-to-WebSocket bridge.
+Europa uses only HTTP and WebSocket APIs; it has no Jupyter process manager,
+ZeroMQ reader, recovery thread, or custom kernel wrapper.
 
-# State of Workflows
-![Workflow](docs/modularOverview.png)
+This milestone is **local development only**. A virtual environment and temporary
+working directory do not isolate hostile Python from the host. Execute trusted
+code only. Gateway and Europa are bound to `127.0.0.1`; Gateway authentication is
+mandatory. Europa has no end-user authentication and must remain on loopback.
+No container orchestration, prewarming, MCP, or frontend is implemented.
 
-## Future Improvements
-- Improve execution of python code in various scenarios (in case if the kernel is busy executing code)
-- See through history of previously executed code
-- Streaming Output of Code Blocks
+## Reproducible environment
 
-## Other Notes
-- In src/internal/kernel.py we are currently using `jupyter_client.manager.KernelManager` to invoke the instance, we might consider getting into `provisioning` in future.
-- Involving Security of running unsafe code
+Use CPython 3.13 (validated with 3.13.0). `requirements.in` lists direct pins and
+`requirements.lock` locks transitives and artifact hashes with platform markers.
+It includes development/test dependencies. Installation does not launch services.
 
+```sh
+python3.13 -m venv .venv
+.venv/bin/python -m pip install --require-hashes -r requirements.lock
+.venv/bin/python -m ipykernel install --prefix .venv --name python3 --display-name 'Python 3 (Europa)'
+```
 
-## Existing Routes
-| Method | Path                        | Description                                 |
-|--------|-----------------------------|---------------------------------------------|
-| GET    | /api/kernel/start               | Start a Jupyter kernel                      |
-| GET    | /api/kernel/restart             | Restarts Jupyter kernel                     |
-| POST   | /api/kernel/execute             | Execute code in the kernel                  |
-| GET    | /api/kernel/info  [WIP]              | Get info about the current kernel           |
-| POST   | /api/kernel/shutdown            | Shutdown the kernel                         |
-| POST   | /api/kernel/install-packages  [WIP]  | Install Python Packages to Jupyter Kernel             |
+With uv: `uv venv --python 3.13 .venv`, then
+`uv pip sync --python .venv/bin/python --require-hashes requirements.lock`.
+Refresh the lock deliberately with
+`uv pip compile requirements.in --python-version 3.13 --universal --generate-hashes -o requirements.lock`.
 
-### Run the FastAPI server
-`fastapi dev main.py`
+## Launch the canonical backend
+
+Configure a token in the environment, not command-line arguments. These commands
+generate a new development token; keep the same environment in the Europa terminal.
+Do not commit tokens or print them to logs.
+
+```sh
+export KG_AUTH_TOKEN="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export KG_PORT=8888
+export EUROPA_GATEWAY_URL="http://127.0.0.1:${KG_PORT}"
+export EUROPA_GATEWAY_TOKEN="$KG_AUTH_TOKEN"
+.venv/bin/python -m kernel_gateway --config=gateway/jupyter_kernel_gateway_config.py
+```
+
+In a second terminal with the configured Europa environment:
+
+```sh
+.venv/bin/python -m uvicorn main:app --app-dir api/src --host 127.0.0.1 --port 8000
+```
+
+Gateway config fixes loopback binding, disables port fallback and pre-spawning,
+allows only the venv's `python3` kernelspec, and limits kernels to four. Creation
+sends `env={}` to activate Gateway environment filtering; only PATH and configured
+HOME/TMPDIR/locale variables reach kernels. This does not restrict filesystem or
+network access. Stop Europa gracefully before Gateway so its lifespan can delete
+owned kernels. Gateway shutdown also owns kernel cleanup.
+
+The optional Dockerfile is a development build definition, not an orchestrator or
+an isolation guarantee. It has not been built in this milestone.
+
+## Application API
+
+| Method | Europa path | Behavior |
+|---|---|---|
+| POST | `/api/kernel/start?kernel_name=python3` | Create a kernel; return Gateway model after readiness |
+| GET | `/api/kernel/info?kernel_id=ID` | Inspect Gateway model |
+| POST | `/api/kernel/execute?kernel_id=ID&timeout=30` | JSON body `{"code":"print(42)"}`; structured result |
+| POST | `/api/kernel/interrupt?kernel_id=ID` | Official interrupt; available during execution; 204 |
+| POST | `/api/kernel/restart?kernel_id=ID` | Official restart; await readiness; return model |
+| POST | `/api/kernel/shutdown?kernel_id=ID` | Official termination; 204 |
+| GET | `/api/health` | Authenticated Gateway availability and execution metadata |
+
+Gateway requests use `Authorization: token ...`. REST calls are
+`POST /api/kernels`, `GET /api/kernels/{id}`, `POST /api/kernels/{id}/interrupt`,
+`POST /api/kernels/{id}/restart`, and `DELETE /api/kernels/{id}`.
+Channels use `/api/kernels/{id}/channels`.
+
+Each execution opens a standard JSON WebSocket connection, verifies readiness with
+a correlated `kernel_info_reply`, sends `execute_request` with `allow_stdin=false`,
+and preserves matching Jupyter messages. Completion requires **both** matching
+shell `execute_reply` and IOPub `status: idle`, in either order. MIME bundles,
+stdout/stderr, errors, and display events remain in `messages`. Results contain
+`execution_id`, `kernel_id`, `status`, `reply`, and `messages`. Python errors return
+`status="error"`; transport failures use HTTP errors. Optional binary WebSocket
+subprotocols are not requested; unexpected binary frames fail explicitly.
+
+There is no scheduler or queue. A second execution, restart, or shutdown during
+an active operation returns 409; interrupt remains available. Timeout, cancellation,
+channel failure, and output-budget exhaustion request Gateway DELETE; state is
+lost. Failed deletion retains ownership for teardown retry. If Gateway is
+unavailable, Europa cannot prove remote termination. Limits: 1,000,000 code
+characters, 0 < timeout <= 300 seconds, 4 MiB matching message data per execution,
+and 50 completed metadata records.
+
+### Breaking changes
+
+- Kernel IDs are explicit; start creates a new kernel instead of returning a singleton.
+- Execution returns structured JSON, replacing plain-text HTTP streaming.
+- Restart returns after readiness, replacing an unobservable background task.
+- Shutdown returns 204; host PIDs/custom wrapper statistics are no longer API contracts.
+- `/api/kernel/install-packages` returns 501; installation is outside this milestone.
+- Ownership is per application instance; multiple workers do not share a registry.
+
+## Tests
+
+Protocol regression tests launch no processes or kernels:
+
+```sh
+.venv/bin/python -m pytest tests/test_gateway_protocol.py -q
+```
+
+Real local integration tests require explicit opt-in and the repository `.venv`:
+
+```sh
+.venv/bin/python -m pytest --run-local-gateway -q -s --junitxml=test-results/integration.xml
+```
+
+Each integration test launches an authenticated loopback Gateway on an available
+port in a disposable working/home/config directory. Tests use only trusted,
+bounded repository source, never external workloads or package-installation tests.
+Fixtures delete kernels through REST, verify an empty kernel list, stop/reap
+Gateway, check captured descendant process identities, and fail if forced cleanup
+is required. Process-group termination is a test-harness last resort, not
+application kernel-management code.
+
+`test-results/` contains actual JUnit results and startup/cleanup timing records.
+Docker is not required under the approved local test mode. Without
+`--run-local-gateway`, integration cases are explicitly skipped; those skips do
+not count as validation. The local process-group harness requires POSIX.
+
+## Jupyter Server compatibility
+
+Kernel Gateway is the **only launched kernel backend**. Jupyter Server is a library
+dependency for kernel handlers; no second Jupyter Server service is launched.
+Kernel REST and channels overlap, but this client is validated against the locked
+Gateway stack, not every Jupyter Server feature.
+
+Gateway does not supply notebook document editing/storage. Contents API,
+checkpoints, file-save hooks, and Server extension lifecycle require a separately
+evaluated Jupyter Server backend or document service. Do not launch both merely
+to duplicate kernel operations. A backend change requires tests for authentication,
+environment creation, WebSocket protocols, and ownership semantics.
+
+References:
+
+- [Gateway personality](https://jupyter-kernel-gateway.readthedocs.io/en/latest/websocket-mode.html)
+- [Gateway 3.0.1 kernel handlers](https://github.com/jupyter-server/kernel_gateway/blob/v3.0.1/kernel_gateway/services/kernels/handlers.py)
+- [Jupyter messaging](https://jupyter-client.readthedocs.io/en/stable/messaging.html)
+- [Jupyter Server REST and Contents APIs](https://jupyter-server.readthedocs.io/en/stable/developers/rest-api.html)
+- [WebSocket protocols](https://jupyter-server.readthedocs.io/en/stable/developers/websocket-protocols.html)
+
+See `docs/phase2-review.md` for actual results and limitations. Original code remains
+at Git commit `c35de54ebdb282799c58239230f7e09e4c7f6680`.
+`docs/modularOverview.png` is historical, not the current architecture.

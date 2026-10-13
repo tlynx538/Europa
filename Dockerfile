@@ -1,13 +1,13 @@
-FROM alpine:latest 
-WORKDIR /home/Alpaca 
-
-# Copy Files 
-COPY . .
-
-# Install Dependencies
-RUN apk add --no-cache python3 git python3-dev py3-pip build-base linux-headers
-RUN python3 -m venv /venv
-ENV PATH="/venv/bin:$PATH"
-RUN pip install --no-cache-dir "fastapi[standard]" jupyter_client ipykernel
-
-
+# Optional development image; validation for this milestone uses the local .venv.
+FROM python:3.13.0-slim-bookworm
+WORKDIR /app
+COPY requirements.lock /app/requirements.lock
+RUN python -m pip install --no-cache-dir --require-hashes -r requirements.lock \
+    && python -m ipykernel install --prefix=/usr/local --name=python3
+COPY api/src /app/api/src
+COPY gateway /app/gateway
+ENV PYTHONPATH=/app/api/src
+RUN useradd --create-home --uid 10001 europa
+USER europa
+# Gateway is launched separately. This command runs only Europa.
+CMD ["python", "-m", "uvicorn", "main:app", "--app-dir", "api/src", "--host", "127.0.0.1", "--port", "8000"]
