@@ -243,7 +243,7 @@ async def test_gateway_process_loss_is_controlled(gateway_client, local_gateway)
     local_gateway.capture_children()
     # The test fixture owns this subprocess. Kernel termination remains Gateway's job.
     local_gateway.process.terminate()
-    await asyncio.to_thread(local_gateway.process.wait, 10)
+    await asyncio.to_thread(local_gateway.process.wait, timeout=10)
     with pytest.raises(GatewayError):
         await gateway_client.execute(kernel, "print('trusted')", timeout=2)
     await gone(process)

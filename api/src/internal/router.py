@@ -8,8 +8,8 @@ from kernel.gateway_client import GatewayClient
 router = APIRouter()
 
 
-def get_gateway(request: Request) -> GatewayClient:
-    return request.app.state.gateway
+async def get_gateway(request: Request, notebook_id: Annotated[str, Query(min_length=1, max_length=128, pattern=r".*\S.*")] = "default") -> GatewayClient:
+    return await request.app.state.supervisor.client_for(notebook_id)
 
 
 Gateway = Annotated[GatewayClient, Depends(get_gateway)]
@@ -59,3 +59,20 @@ async def health(gateway: Gateway):
     await gateway.health()
     return {"status": "ready", "backend": "jupyter-kernel-gateway",
             "executions": gateway.tracker.snapshot()}
+
+
+@router.get("/runtime")
+async def runtime_status(request: Request, notebook_id: str = "default"):
+    return await request.app.state.supervisor.status_for(notebook_id)
+
+
+@router.post("/runtime/provision", status_code=201)
+async def provision_runtime(request: Request, notebook_id: Annotated[str, Query(min_length=1, max_length=128, pattern=r".*\S.*")]):
+    await request.app.state.supervisor.client_for(notebook_id)
+    return await request.app.state.supervisor.status_for(notebook_id)
+
+
+@router.delete("/runtime", status_code=204)
+async def destroy_runtime(request: Request, notebook_id: str = "default"):
+    await request.app.state.supervisor.destroy_notebook(notebook_id)
+    return Response(status_code=204)

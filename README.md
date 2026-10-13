@@ -3,8 +3,9 @@
 Europa exposes an application API backed by **Jupyter Kernel Gateway 3.0.1**, using
 the documented `kernel_gateway.jupyter_websocket` personality and standard
 `ipykernel`. Gateway owns kernel processes and the Jupyter-to-WebSocket bridge.
-Europa uses only HTTP and WebSocket APIs; it has no Jupyter process manager,
-ZeroMQ reader, recovery thread, or custom kernel wrapper.
+The Gateway client uses only HTTP and WebSocket APIs; it has no Jupyter process
+manager, ZeroMQ reader, or custom kernel wrapper. A separate asynchronous local
+runtime provider now owns Gateway subprocesses and their development environments.
 
 This milestone is **local development only**. A virtual environment and temporary
 working directory do not isolate hostile Python from the host. Execute trusted
@@ -29,7 +30,41 @@ With uv: `uv venv --python 3.13 .venv`, then
 Refresh the lock deliberately with
 `uv pip compile requirements.in --python-version 3.13 --universal --generate-hashes -o requirements.lock`.
 
-## Launch the canonical backend
+## Launch provider-managed local development
+
+With `EUROPA_GATEWAY_URL` unset, one command starts FastAPI and provisions its
+default authenticated local Gateway runtime through `LocalRuntimeProvider`:
+
+```sh
+.venv/bin/python -m uvicorn main:app --app-dir api/src --host 127.0.0.1 --port 8000
+```
+
+The provider allocates a loopback port, generates a private token, and uses a
+temporary home/work/config directory. FastAPI lifespan deletes kernels and
+destroys owned runtimes on shutdown. No manual Gateway launch is needed in this
+mode. Local CPU/memory requests are metadata only; no resource limits are enforced.
+
+All existing kernel routes accept an optional `notebook_id` query parameter,
+defaulting to `default`. A different identifier provisions a separate Gateway and
+client. This is a logical ownership association, not notebook document storage or
+user authorization. The existing kernel IDs, responses, MIME data, interruption,
+restart, and shutdown contracts remain unchanged. HTTP outputs remain buffered
+JSON, as in Step 1B; no new HTTP streaming API was added.
+
+Additional runtime operations:
+
+- `POST /api/runtime/provision?notebook_id=A`: ensure one ready runtime for A.
+- `GET /api/runtime?notebook_id=A`: observed status without authentication material.
+- `DELETE /api/runtime?notebook_id=A`: close its client and destroy the owned runtime.
+
+Concurrent provisioning for the same notebook is serialized; different notebooks
+can provision independently. A dead/unready runtime returns 503 instead of a stale
+healthy handle. Destroy it before explicitly provisioning a replacement. There is
+no automatic restart, warming, eviction, scheduler, or distributed coordination.
+
+See [RuntimeProvider contracts and Step 2A results](docs/runtime-provider.md).
+
+## Connect an externally launched Gateway (compatibility mode)
 
 Configure a token in the environment, not command-line arguments. These commands
 generate a new development token; keep the same environment in the Europa terminal.
@@ -40,6 +75,7 @@ export KG_AUTH_TOKEN="$(.venv/bin/python -c 'import secrets; print(secrets.token
 export KG_PORT=8888
 export EUROPA_GATEWAY_URL="http://127.0.0.1:${KG_PORT}"
 export EUROPA_GATEWAY_TOKEN="$KG_AUTH_TOKEN"
+export TRAITLETS_APPLICATION_RAISE_CONFIG_FILE_ERROR=1
 .venv/bin/python -m kernel_gateway --config=gateway/jupyter_kernel_gateway_config.py
 ```
 
@@ -116,15 +152,18 @@ Real local integration tests require explicit opt-in and the repository `.venv`:
 .venv/bin/python -m pytest --run-local-gateway -q -s --junitxml=test-results/integration.xml
 ```
 
-Each integration test launches an authenticated loopback Gateway on an available
-port in a disposable working/home/config directory. Tests use only trusted,
+Each integration test uses the production LocalRuntimeProvider to launch an
+authenticated loopback Gateway on an available port in a disposable environment.
+Tests use only trusted,
 bounded repository source, never external workloads or package-installation tests.
 Fixtures delete kernels through REST, verify an empty kernel list, stop/reap
 Gateway, check captured descendant process identities, and fail if forced cleanup
-is required. Process-group termination is a test-harness last resort, not
-application kernel-management code.
+is required in normal shutdown. Runtime-provider crash cleanup can force-stop
+captured descendants by process identity; Jupyter starts kernels in separate
+process groups. This is generic runtime teardown, not custom kernel control.
 
-`test-results/` contains actual JUnit results and startup/cleanup timing records.
+`test-results/` contains actual JUnit results and startup/cleanup timing records,
+including `runtime-timings.json` for the Step 2A provider tests.
 Docker is not required under the approved local test mode. Without
 `--run-local-gateway`, integration cases are explicitly skipped; those skips do
 not count as validation. The local process-group harness requires POSIX.
