@@ -7,6 +7,8 @@ The implementation review and earlier unverified results below are historical.
 Step 2C's current profile defaults, admission configuration and validation are in
 [resource admission](resource-admission.md); its complete legacy resource-variable
 trio remains supported as an override of the default profile.
+Step 2D adds [durable ownership and recovery](runtime-recovery.md) for the production
+containerd deployment, including graceful runtime preservation and explicit teardown.
 
 Implemented on `feature/containerd-provider`, based on Step 2A commit
 `cd50ce8ebad6ddd674e24f46ccd4ce21c963ce57`. The final commit SHA is in the

@@ -78,6 +78,14 @@ async def admission_status(request: Request):
     return await request.app.state.supervisor.admission_status()
 
 
+@router.get("/runtime/recovery")
+async def recovery_status(request: Request):
+    supervisor = request.app.state.supervisor
+    if supervisor.registry is None:
+        return {"enabled": False, "reason": "Local/external process adoption is unsupported"}
+    return {"enabled": True, **await supervisor.recovery_status()}
+
+
 @router.delete("/runtime", status_code=204)
 async def destroy_runtime(request: Request, notebook_id: str = "default"):
     await request.app.state.supervisor.destroy_notebook(notebook_id)

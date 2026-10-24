@@ -14,6 +14,8 @@ from runtime.containerd_backend import SDKBridgeBackend
 from runtime.local import LocalRuntimeProvider
 from runtime.supervisor import RuntimeSupervisor
 from runtime.admission_config import configured_admission
+from runtime.registry import RuntimeRegistry
+from runtime.recovery import RecoveringRuntimeSupervisor
 
 
 def create_app(*, gateway_url: str | None = None, gateway_token: str | None = None,
@@ -22,9 +24,10 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
     async def lifespan(app):
         url = gateway_url or os.environ.get("EUROPA_GATEWAY_URL")
         token = gateway_token or os.environ.get("EUROPA_GATEWAY_TOKEN", "")
-        selection = os.environ.get("EUROPA_RUNTIME_PROVIDER", "local")
+        selection = "local" if url else os.environ.get("EUROPA_RUNTIME_PROVIDER", "local")
         resources = None
         admission = guard = None
+        registry = None
         if runtime_provider is not None:
             provider = runtime_provider
             selection = "local"
@@ -48,15 +51,27 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
         try:
             if guard:
                 guard.acquire()
-                await provider.assert_empty_namespace()
+                registry_path = Path(os.environ.get('EUROPA_RUNTIME_REGISTRY',
+                    str(Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / 'europa/runtime.sqlite3')))
+                registry = RuntimeRegistry(registry_path, provider.recovery_scope())
+                supervisor = RecoveringRuntimeSupervisor(provider, admission, registry)
+                app.state.supervisor = supervisor
+                await supervisor.reconcile()
             if url:
+                if registry:
+                    raise RuntimeErrorBase('External Gateway attachment is not supported by the durable containerd deployment')
                 await supervisor.attach("default", GatewayEndpoint(url, token))
-            app.state.gateway = await supervisor.client_for()
+            if registry and (supervisor.recovery_blockers or 'default' in supervisor.reconciliation_notes):
+                app.state.gateway = None  # Serve reconciliation diagnostics while provisioning is denied.
+            else:
+                app.state.gateway = await supervisor.client_for()
             yield
         finally:
             try:
                 await supervisor.close()
             finally:
+                if registry:
+                    registry.close()
                 if guard:
                     guard.close()
 

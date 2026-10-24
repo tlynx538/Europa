@@ -1,5 +1,10 @@
 # Step 2C: single-node resource admission
 
+Step 2D supersedes this milestone's in-memory recovery boundary and empty-namespace
+startup rule with [durable ownership and reconciliation](runtime-recovery.md).
+Profiles, reserve arithmetic, limits and admission behavior below remain applicable;
+the Step 2C lifecycle/recovery descriptions record the starting implementation.
+
 Implemented on `feature/resource-admission`, starting from Step 2B commit
 `681dec0f89991dc7a06da3aa765476c81b3ca691`. The implementation commit is recorded
 in Git history and the completion response. This milestone adds admission to the

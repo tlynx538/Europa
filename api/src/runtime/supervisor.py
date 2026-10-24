@@ -19,6 +19,7 @@ class RuntimeSupervisor:
         self.default_provider = default_provider
         self.default_resources = default_resources
         self.admission = admission
+        self.registry = None
         self._allocations = {}
         self.handles: dict[str, RuntimeHandle] = {}
         self.notebooks: dict[str, str] = {}
@@ -75,6 +76,8 @@ class RuntimeSupervisor:
                 provider = self.providers[spec.provider]
             except KeyError as exc:
                 raise RuntimeErrorBase("Unknown runtime provider") from exc
+            if self.registry and (not self.reconciled or self.recovery_blockers):
+                raise AdmissionRejected("Runtime recovery requires operator reconciliation; new admission denied")
             if self.admission and spec.provider == "containerd":
                 return await self._ensure_admitted(spec, provider)
             if spec.resource_profile is not None:
@@ -128,8 +131,14 @@ class RuntimeSupervisor:
         name = spec.notebook_id
         if name in self._allocations:
             raise AdmissionRejected("Notebook startup cleanup is pending; destroy it before retrying")
-        _, resources = await self.admission.reserve(name, spec)
+        profile, resources = await self.admission.reserve(name, spec)
         identity = "europa-" + uuid.uuid4().hex
+        if self.registry:
+            try:
+                self.registry.create(name, identity, profile, resources, provider.config)
+            except BaseException:
+                await self.admission.release(name)
+                raise
         # Record a known identity before the provider can have any side effect.
         self._allocations[name] = (provider, {identity})
         spec = replace(spec, resources=resources, resource_profile=None, allocation_id=identity)
@@ -148,6 +157,8 @@ class RuntimeSupervisor:
             self._clients[handle.runtime_id] = client
             await client.__aenter__()
             await client.health()
+            if self.registry:
+                self.registry.transition(identity, 'active')
             await self.admission.activate(name)
             return handle
         except BaseException as original:
@@ -161,6 +172,9 @@ class RuntimeSupervisor:
 
     async def _destroy_admitted(self, name):
         provider, identities = self._allocations[name]
+        if self.registry:
+            for identity in identities:
+                self.registry.transition(identity, 'deleting')
         client_error = None
         for identity in identities:
             self._unavailable.add(identity)
@@ -173,6 +187,12 @@ class RuntimeSupervisor:
         try:
             for identity in identities:
                 await provider.destroy(identity)
+                if self.registry:
+                    inventory = await provider.backend.request('inventory', identity)
+                    if inventory != {'containers': 0, 'tasks': 0, 'snapshot_present': False,
+                                     'network_state_present': False}:
+                        raise RuntimeErrorBase('Runtime destruction could not be confirmed')
+                    self.registry.transition(identity, 'destroyed')
         except BaseException:
             await self.admission.retain(name, cleanup_failed=True)
             raise

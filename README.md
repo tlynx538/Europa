@@ -144,7 +144,8 @@ and 50 completed metadata records.
 - Restart returns after readiness, replacing an unobservable background task.
 - Shutdown returns 204; host PIDs/custom wrapper statistics are no longer API contracts.
 - `/api/kernel/install-packages` returns 501; installation is outside this milestone.
-- Ownership is per application instance; multiple workers do not share a registry.
+- Local/external ownership is per application instance. Durable containerd ownership
+  uses a private single-writer registry; multiple workers are unsupported.
 
 ## Tests
 
@@ -213,6 +214,13 @@ The default profile is 0.5 CPU, 512 MiB and 128 PIDs. Use
 `POST /api/runtime/provision?notebook_id=A&resource_profile=PROFILE` to select a
 configured profile and `GET /api/runtime/admission` for accounting metrics.
 Local development retains its existing behavior and has no enforced resource budget.
+
+Step 2D adds [durable runtime recovery](docs/runtime-recovery.md) with SQLite,
+startup inventory reconciliation, verified surviving kernel adoption and fenced SDK
+operations. Set `EUROPA_RUNTIME_REGISTRY` to private persistent local storage.
+Durable containerd shutdown preserves runtimes; explicitly delete them through
+`DELETE /api/runtime?notebook_id=A`. `GET /api/runtime/recovery` reports blockers
+and operator states. Local process adoption remains unsupported.
 
 See `docs/phase2-review.md` for migration results and limitations. Original code remains
 at Git commit `c35de54ebdb282799c58239230f7e09e4c7f6680`.

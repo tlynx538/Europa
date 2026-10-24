@@ -155,6 +155,14 @@ class AdmissionController:
             profile, resources, _ = self._reservations[key]
             self._reservations[key] = (profile, resources, "active")
 
+    async def restore(self, key, profile, resources):
+        """Restore occupied capacity even when it exceeds today's admission budget."""
+        validate_resources(resources)
+        async with self._lock:
+            if key in self._reservations:
+                raise AdmissionRejected("Duplicate durable notebook reservation")
+            self._reservations[key] = (profile, resources, "cleanup_pending")
+
     async def retain(self, key, *, cleanup_failed=False):
         async with self._lock:
             if key in self._reservations:

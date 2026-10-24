@@ -6,6 +6,7 @@ One active operation per kernel is admitted; interrupt remains available while b
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
@@ -70,6 +71,42 @@ class GatewayClient:
             if self._session:
                 await self._session.close()
                 self._session = None
+
+    async def disconnect(self):
+        """Relinquish transport only; a durable runtime owner retains the kernels."""
+        self._closing = True
+        if self._session:
+            await self._session.close()
+            self._session = None
+        self._owned.clear()
+
+    async def recover_kernels(self):
+        """Only after exclusive runtime/notebook/credential ownership is verified.
+
+        Busy or ambiguous kernels require operator reconciliation; never interrupt
+        or delete them merely to make recovery appear successful.
+        """
+        if self._owned or self._closing:
+            raise GatewayError('Kernel recovery requires a fresh open client', 503)
+        models = await self._request('GET', '/api/kernels')
+        if not isinstance(models, list) or len(models) > 4:
+            raise GatewayError('Invalid surviving kernel inventory', 503)
+        identities = []
+        for model in models:
+            if (not isinstance(model, dict) or not isinstance(model.get('id'), str)
+                    or not re.fullmatch(r'[A-Za-z0-9-]{1,128}', model['id'])
+                    or model.get('name') != 'python3' or model.get('execution_state') != 'idle'
+                    or model['id'] in identities):
+                raise GatewayError('Surviving kernels are not safely recoverable', 503)
+            identities.append(model['id'])
+        self._owned.update(identities)
+        try:
+            for identity in identities:
+                await self.wait_ready(identity)
+        except BaseException:
+            self._owned.clear()
+            raise
+        return models
 
     def _session_ready(self) -> aiohttp.ClientSession:
         if self._session is None:

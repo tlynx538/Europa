@@ -1,11 +1,14 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -17,27 +20,48 @@ type resources struct {
 	Pids   int64   `json:"pids_limit"`
 }
 type request struct {
-	Operation   string            `json:"operation"`
-	ID          string            `json:"id"`
-	Socket      string            `json:"socket"`
-	Namespace   string            `json:"namespace"`
-	CNIConfig   string            `json:"cni_config"`
-	CNIBin      string            `json:"cni_bin"`
-	StateRoot   string            `json:"state_root"`
-	Timeout     float64           `json:"timeout_seconds"`
-	Image       string            `json:"image"`
-	Handler     string            `json:"handler"`
-	NotebookID  string            `json:"notebook_id"`
-	Resources   resources         `json:"resources"`
-	Token       string            `json:"token"`
-	Environment map[string]string `json:"environment"`
-	Grace       float64           `json:"grace_seconds"`
+	Operation     string            `json:"operation"`
+	ID            string            `json:"id"`
+	Socket        string            `json:"socket"`
+	Namespace     string            `json:"namespace"`
+	CNIConfig     string            `json:"cni_config"`
+	CNIBin        string            `json:"cni_bin"`
+	StateRoot     string            `json:"state_root"`
+	Timeout       float64           `json:"timeout_seconds"`
+	Image         string            `json:"image"`
+	Handler       string            `json:"handler"`
+	NotebookID    string            `json:"notebook_id"`
+	Resources     resources         `json:"resources"`
+	Token         string            `json:"token"`
+	Environment   map[string]string `json:"environment"`
+	Grace         float64           `json:"grace_seconds"`
+	OwnerID       string            `json:"owner_id"`
+	Generation    int64             `json:"generation"`
+	OperationLock string            `json:"operation_lock"`
+	SessionEpoch  string            `json:"session_epoch"`
+	BeginRecovery bool              `json:"begin_recovery"`
 }
 
 var identifier = regexp.MustCompile(`^europa-[a-f0-9]{32}$`)
 var imageDigest = regexp.MustCompile(`^[^\s@]+@sha256:[a-f0-9]{64}$`)
 
 func validate(r request) error {
+	if r.OperationLock != "" {
+		scope := sha256.Sum256([]byte(filepath.Clean(r.Socket) + ":" + r.Namespace))
+		expected := fmt.Sprintf("/tmp/europa-runtime-operations-%x.lock", scope[:8])
+		if !filepath.IsAbs(r.Socket) || r.OperationLock != expected {
+			return errors.New("invalid operation fence path")
+		}
+	}
+	if r.OwnerID != "" && (r.OperationLock == "" || r.SessionEpoch == "") {
+		return errors.New("durable session fence required")
+	}
+	if r.BeginRecovery && r.Operation != "recovery_inventory" {
+		return errors.New("invalid fence transition")
+	}
+	if r.OwnerID != "" && (!regexp.MustCompile(`^[a-f0-9]{32}$`).MatchString(r.OwnerID) || r.Generation < 0) {
+		return errors.New("invalid durable owner or generation")
+	}
 	if !identifier.MatchString(r.ID) || r.Namespace != "europa" || r.Timeout <= 0 || r.Timeout > 300 {
 		return errors.New("invalid ownership identity or deadline")
 	}
@@ -122,4 +146,37 @@ func validateNetwork(data []byte) error {
 		return errors.New("subnet extends outside private address space")
 	}
 	return nil
+}
+
+func ownershipLabels(r request) map[string]string {
+	return map[string]string{"europa.runtime_id": r.ID, "europa.notebook_id": r.NotebookID,
+		"europa.owner_id": r.OwnerID, "europa.generation": strconv.FormatInt(r.Generation, 10)}
+}
+
+func verifyOwner(labels map[string]string, r request, generation bool) error {
+	for key, value := range ownershipLabels(r) {
+		if key == "europa.generation" && !generation {
+			observed, err := strconv.ParseInt(labels[key], 10, 64)
+			if err != nil || observed < 0 || observed > r.Generation {
+				return errors.New("generation ownership mismatch")
+			}
+			continue
+		}
+		if labels[key] != value {
+			return errors.New("durable ownership mismatch")
+		}
+	}
+	return nil
+}
+
+func specResources(s *specs.Spec) (resources, error) {
+	if s.Linux == nil || s.Linux.Resources == nil {
+		return resources{}, errors.New("missing resource controls")
+	}
+	v := s.Linux.Resources
+	if v.CPU == nil || v.CPU.Quota == nil || v.CPU.Period == nil || *v.CPU.Period == 0 ||
+		v.Memory == nil || v.Memory.Limit == nil || v.Pids == nil {
+		return resources{}, errors.New("incomplete limits")
+	}
+	return resources{float64(*v.CPU.Quota) / float64(*v.CPU.Period), *v.Memory.Limit, v.Pids.Limit}, nil
 }

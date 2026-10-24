@@ -54,3 +54,27 @@ func TestPrivateNetworkProfile(t *testing.T) {
 		}
 	}
 }
+
+func TestDurableOwnershipGeneration(t *testing.T) {
+	r := request{ID: "europa-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NotebookID: "A", OwnerID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Generation: 2}
+	labels := ownershipLabels(r)
+	if err := verifyOwner(labels, r, true); err != nil {
+		t.Fatal(err)
+	}
+	labels["europa.notebook_id"] = "B"
+	if err := verifyOwner(labels, r, true); err == nil {
+		t.Fatal("accepted another notebook")
+	}
+	labels["europa.notebook_id"] = "A"
+	labels["europa.generation"] = "1"
+	if err := verifyOwner(labels, r, true); err == nil {
+		t.Fatal("adopted stale generation")
+	}
+	if err := verifyOwner(labels, r, false); err != nil {
+		t.Fatal("cannot clean interrupted start", err)
+	}
+	labels["europa.generation"] = "3"
+	if err := verifyOwner(labels, r, false); err == nil {
+		t.Fatal("destroyed newer generation")
+	}
+}

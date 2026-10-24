@@ -171,12 +171,14 @@ print(p.returncode)''')
 
 
 @pytest.mark.parametrize('sandbox', ['runc'], indirect=True)
-async def test_real_admission_http(sandbox, monkeypatch):
+async def test_real_admission_http(sandbox, monkeypatch, tmp_path):
     import httpx
     from main import create_app
     provider, _ = sandbox
     await provider.assert_empty_namespace()
     monkeypatch.setenv('EUROPA_RUNTIME_PROVIDER', 'containerd')
+    # Durable control-plane shutdown preserves containers; this test owns a private registry.
+    monkeypatch.setenv('EUROPA_RUNTIME_REGISTRY', str(tmp_path / 'registry/runtime.sqlite3'))
     monkeypatch.delenv('EUROPA_GATEWAY_URL', raising=False)
     monkeypatch.setenv('EUROPA_RESOURCE_PROFILES', json.dumps({
         'standard': {'cpu_cores': .5, 'memory_bytes': 384 * 1024**2, 'pids_limit': 128},
@@ -204,6 +206,7 @@ async def test_real_admission_http(sandbox, monkeypatch):
             result = await http.post('/api/kernel/execute', params={'notebook_id': 'B', 'kernel_id': kernel}, json={'code': 'print(42)'})
             assert result.status_code == 200 and stdout(result.json()) == '42\n'
             assert (await http.get('/api/runtime/admission')).json()['active_notebook_runtime_count'] == 1
+            assert (await http.delete('/api/runtime', params={'notebook_id': 'B'})).status_code == 204
     await provider.assert_empty_namespace()
     # Independently exercise the actual built-in defaults without legacy overrides.
     for name in ['EUROPA_RESOURCE_PROFILES', 'EUROPA_RESOURCE_DEFAULT_PROFILE',
@@ -219,4 +222,5 @@ async def test_real_admission_http(sandbox, monkeypatch):
         kernel = (await client.create_kernel())['id']
         assert stdout(await client.execute(kernel, 'print(42)')) == '42\n'
         await client.terminate_kernel(kernel)
+        await supervisor.destroy_notebook('default')
     await provider.assert_empty_namespace()

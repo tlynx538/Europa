@@ -105,3 +105,51 @@ async def test_output_budget_deletes_without_reporting_success():
 def test_invalid_or_unauthenticated_configuration_rejected(url, token):
     with pytest.raises(ValueError):
         GatewayClient(url, token)
+
+
+@pytest.mark.parametrize('models', [
+    [{'id': 'safe', 'name': 'python3', 'execution_state': 'busy'}],
+    [{'id': '../foreign', 'name': 'python3', 'execution_state': 'idle'}],
+    [{'id': 'safe', 'name': 'other', 'execution_state': 'idle'}],
+    [{'id': 'same', 'name': 'python3', 'execution_state': 'idle'}] * 2,
+    {'id': 'invalid'},
+])
+async def test_recovery_rejects_ambiguous_kernels_without_deleting(models):
+    client = GatewayClient('http://127.0.0.1:8888', 'test-token')
+    calls = []
+    async def request(method, path, **kwargs):
+        calls.append((method, path))
+        return models
+    client._request = request
+    with pytest.raises(GatewayError): await client.recover_kernels()
+    assert not client._owned and calls == [('GET', '/api/kernels')]
+
+
+async def test_recovery_handshake_failure_does_not_delete_surviving_kernel():
+    client = GatewayClient('http://127.0.0.1:8888', 'test-token')
+    calls = []
+    async def request(method, path, **kwargs):
+        calls.append((method, path))
+        return [{'id': 'safe', 'name': 'python3', 'execution_state': 'idle'}]
+    async def fail(identity): raise GatewayError('handshake failed')
+    client._request = request
+    client.wait_ready = fail
+    with pytest.raises(GatewayError): await client.recover_kernels()
+    assert not client._owned and calls == [('GET', '/api/kernels')]
+
+
+async def test_recovery_and_disconnect_preserve_surviving_kernel():
+    client = GatewayClient('http://127.0.0.1:8888', 'test-token')
+    ready = []; closed = []
+    async def request(method, path, **kwargs):
+        assert method == 'GET'
+        return [{'id': 'safe', 'name': 'python3', 'execution_state': 'idle'}]
+    async def handshake(identity): ready.append(identity)
+    async def close(): closed.append(True)
+    client._request = request
+    client.wait_ready = handshake
+    client._session = SimpleNamespace(close=close)
+    await client.recover_kernels()
+    assert client._owned == {'safe'} and ready == ['safe']
+    await client.disconnect()
+    assert client._closing and client._session is None and closed == [True]
