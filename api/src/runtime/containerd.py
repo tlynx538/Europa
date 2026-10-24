@@ -23,7 +23,7 @@ HANDLERS = {"runc": "io.containerd.runc.v2", "runsc": "io.containerd.runsc.v1"}
 @dataclass(frozen=True)
 class ContainerdConfig:
     image: str
-    handler: str = "runsc"
+    handler: str = "runc"
     stop_timeout: float = 5
 
     def __post_init__(self):

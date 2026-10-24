@@ -7,12 +7,18 @@ The Gateway client uses only HTTP and WebSocket APIs; it has no Jupyter process
 manager, ZeroMQ reader, or custom kernel wrapper. Runtime providers own either
 development subprocesses or containerd tasks through a separate provisioning layer.
 
-Validation on this host covers **trusted local development** and mocked containerd
-behavior. Real container isolation remains unverified. A virtual environment and temporary
-working directory do not isolate hostile Python from the host. Execute trusted
-code only. Gateway and Europa are bound to `127.0.0.1`; Gateway authentication is
-mandatory. Europa has no end-user authentication and must remain on loopback.
-The containerd adapter is opt-in and requires approved Linux infrastructure.
+Validation covers **trusted local development**, mocked containerd behavior, and
+real containerd+runc execution on an ARM64 Lima VM. See the
+[runc validation report](docs/step2b-runc-validation.md) for measured limits,
+cleanup, and benchmarks. Runc containers share the host Linux kernel; they are
+not equivalent to gVisor for untrusted-code isolation. A virtual environment and
+temporary working directory do not isolate hostile Python from the host.
+Europa and local Gateways bind to loopback; container Gateways are reachable only
+through the approved private CNI network. Gateway authentication is mandatory.
+Europa has no end-user authentication and must remain on loopback. The containerd
+adapter is opt-in and requires approved Linux infrastructure. Runc is its default
+OCI handler; experimental runsc is deferred due to its independently reproduced
+[upstream exit-status problem](docs/gvisor-exit-status-investigation.md).
 No prewarming, MCP, or frontend is implemented.
 
 ## Reproducible environment
@@ -195,8 +201,10 @@ Step 2B adds an opt-in containerd provider using the supported Go SDK and native
 `runc`/`runsc` handlers. Local development remains the default. See
 [containerd provider review](docs/containerd-provider.md) for configuration, the
 digest-pinned Gateway image, actual tests and benchmarks, and Linux prerequisites.
-Real container tests are explicitly skipped on the current macOS host; container
-isolation has not been validated. No warm pool or MCP integration is included.
+Real runc tests run inside Linux using `--run-containerd` and explicit operator
+configuration; `-k runc` selects the 14 runc scenarios while runsc is deferred.
+Local development remains the fallback when `EUROPA_RUNTIME_PROVIDER` is unset.
+No warm pool or MCP integration is included.
 
 See `docs/phase2-review.md` for migration results and limitations. Original code remains
 at Git commit `c35de54ebdb282799c58239230f7e09e4c7f6680`.

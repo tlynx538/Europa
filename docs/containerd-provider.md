@@ -1,5 +1,10 @@
 # Phase 2, Step 2B: containerd provider review
 
+Current strategy: containerd defaults to **runc**, local remains the development
+fallback, and experimental runsc is deferred. Actual ARM64 image/provider tests
+and resource-enforcement results are in [the runc validation report](step2b-runc-validation.md).
+The implementation review and earlier unverified results below are historical.
+
 Implemented on `feature/containerd-provider`, based on Step 2A commit
 `cd50ce8ebad6ddd674e24f46ccd4ce21c963ce57`. The final commit SHA is in the
 completion response and Git history. Step 2B stops at the adapter, image definition,
@@ -139,9 +144,10 @@ Configure FastAPI with these environment variables (local remains the default):
 | `EUROPA_RUNTIME_PROVIDER` | `containerd` to select this provider; default `local` |
 | `EUROPA_CONTAINERD_BRIDGE` | Required: absolute bridge executable path |
 | `EUROPA_CONTAINERD_IMAGE` | Required: built Gateway image reference pinned by sha256 |
-| `EUROPA_CONTAINERD_HANDLER` | `runsc` default, or `runc` |
+| `EUROPA_CONTAINERD_HANDLER` | `runc` default; experimental `runsc` deferred pending its upstream exit-status correction |
 | `EUROPA_CONTAINERD_SOCKET` | Default `/run/containerd/containerd.sock` |
 | `EUROPA_CONTAINERD_CNI_CONFIG` | Required: approved Europa private CNI conflist |
+| `EUROPA_CONTAINERD_CNI_BIN` | CNI plugin directory; default `/opt/cni/bin` |
 | `EUROPA_CONTAINERD_CPU_CORES` | Required positive explicit CPU quota |
 | `EUROPA_CONTAINERD_MEMORY_BYTES` | Required positive explicit memory limit |
 | `EUROPA_CONTAINERD_PIDS_LIMIT` | Required positive explicit PID limit |

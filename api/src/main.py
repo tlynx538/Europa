@@ -35,9 +35,10 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
                 int(os.environ["EUROPA_CONTAINERD_MEMORY_BYTES"]), int(os.environ["EUROPA_CONTAINERD_PIDS_LIMIT"]))
             backend = SDKBridgeBackend(Path(os.environ["EUROPA_CONTAINERD_BRIDGE"]),
                 socket=os.environ.get("EUROPA_CONTAINERD_SOCKET", "/run/containerd/containerd.sock"),
-                cni_config=os.environ["EUROPA_CONTAINERD_CNI_CONFIG"])
+                cni_config=os.environ["EUROPA_CONTAINERD_CNI_CONFIG"],
+                cni_bin=os.environ.get("EUROPA_CONTAINERD_CNI_BIN", "/opt/cni/bin"))
             provider = ContainerdRuntimeProvider(backend, ContainerdConfig(
-                os.environ["EUROPA_CONTAINERD_IMAGE"], os.environ.get("EUROPA_CONTAINERD_HANDLER", "runsc")))
+                os.environ["EUROPA_CONTAINERD_IMAGE"], os.environ.get("EUROPA_CONTAINERD_HANDLER", "runc")))
         else:
             raise RuntimeErrorBase("Unknown runtime provider selection")
         supervisor = RuntimeSupervisor({selection: provider}, default_provider=selection,

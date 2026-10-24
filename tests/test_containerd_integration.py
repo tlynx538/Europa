@@ -41,7 +41,8 @@ async def sandbox(request):
         if not shutil.which(binary): pytest.skip(f"missing {binary}")
     backend = SDKBridgeBackend(Path(os.environ["EUROPA_CONTAINERD_BRIDGE"]),
         socket=os.environ.get("EUROPA_CONTAINERD_SOCKET", "/run/containerd/containerd.sock"),
-        cni_config=os.environ["EUROPA_CONTAINERD_CNI_CONFIG"])
+        cni_config=os.environ["EUROPA_CONTAINERD_CNI_CONFIG"],
+        cni_bin=os.environ.get("EUROPA_CONTAINERD_CNI_BIN", "/opt/cni/bin"))
     provider = ContainerdRuntimeProvider(backend, ContainerdConfig(os.environ["EUROPA_CONTAINERD_IMAGE"], handler))
     resources = ResourceRequests(float(os.environ["EUROPA_CONTAINERD_CPU_CORES"]),
         int(os.environ["EUROPA_CONTAINERD_MEMORY_BYTES"]), int(os.environ["EUROPA_CONTAINERD_PIDS_LIMIT"]))
