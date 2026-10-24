@@ -33,6 +33,7 @@ def admission():
 
 
 async def crash_child(tmp_path, mode, monkeypatch):
+    monkeypatch.setenv('EUROPA_WARM_TARGET', '0')
     monkeypatch.delenv('EUROPA_GATEWAY_URL', raising=False)
     monkeypatch.setenv('EUROPA_RUNTIME_PROVIDER', 'containerd')
     monkeypatch.setenv('EUROPA_CONTAINERD_HANDLER', 'runc')
@@ -202,6 +203,7 @@ async def test_real_containerd_service_restart(sandbox, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('sandbox', ['runc'], indirect=True)
 async def test_real_graceful_restart_retains_kernel(sandbox, tmp_path, monkeypatch):
+    monkeypatch.setenv('EUROPA_WARM_TARGET', '0')
     from main import create_app
     provider, _ = sandbox
     await provider.assert_empty_namespace()

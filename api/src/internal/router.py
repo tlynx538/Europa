@@ -86,6 +86,12 @@ async def recovery_status(request: Request):
     return {"enabled": True, **await supervisor.recovery_status()}
 
 
+@router.get('/runtime/pool')
+async def warm_pool_status(request: Request):
+    pool = getattr(request.app.state.supervisor, 'pool', None)
+    return pool.status() if pool else {'enabled': False, 'reason': 'Prewarming requires durable containerd ownership'}
+
+
 @router.delete("/runtime", status_code=204)
 async def destroy_runtime(request: Request, notebook_id: str = "default"):
     await request.app.state.supervisor.destroy_notebook(notebook_id)

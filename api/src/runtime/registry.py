@@ -14,7 +14,7 @@ from runtime.admission import validate_resources
 from runtime.capacity import SingleWriterGuard
 from runtime.contracts import ResourceRequests, RuntimeErrorBase
 
-PHASES = {'provisioning', 'active', 'deleting', 'reconciliation', 'destroyed'}
+PHASES = {'provisioning', 'ready', 'claimed', 'active', 'deleting', 'reconciliation', 'destroyed'}
 
 
 class RuntimeRegistry:
@@ -44,22 +44,33 @@ class RuntimeRegistry:
                 raise RuntimeErrorBase('Runtime registry integrity check failed')
             with self.transaction():
                 self.db.execute('CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+                existing = dict(self.db.execute('SELECT key,value FROM metadata').fetchall())
+                binding = json.dumps(scope, sort_keys=True)
+                if existing and (existing.get('scope') != binding or existing.get('version') not in {'1', '2'}):
+                    raise RuntimeErrorBase('Registry schema or containerd scope differs; operator reconciliation required')
+                if existing.get('version') == '1':
+                    self.db.execute('DROP INDEX IF EXISTS live_notebook')
+                    self.db.execute('ALTER TABLE allocations RENAME TO allocations_v1')
                 self.db.execute('''CREATE TABLE IF NOT EXISTS allocations (
-                    runtime_id TEXT PRIMARY KEY, notebook_id TEXT NOT NULL,
+                    runtime_id TEXT PRIMARY KEY, allocation_key TEXT NOT NULL,
+                    notebook_id TEXT, kind TEXT NOT NULL CHECK(kind IN ('assigned','warm')),
                     owner_id TEXT NOT NULL, provider TEXT NOT NULL CHECK(provider='containerd'),
                     profile_id TEXT, cpu REAL NOT NULL CHECK(cpu>0), memory INTEGER NOT NULL CHECK(memory>0),
                     pids INTEGER NOT NULL CHECK(pids>0), image TEXT NOT NULL, handler TEXT NOT NULL,
-                    generation INTEGER NOT NULL CHECK(generation>=0), token_hash TEXT,
-                    phase TEXT NOT NULL CHECK(phase IN ('provisioning','active','deleting','reconciliation','destroyed')),
-                    reason TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL)''')
+                    generation INTEGER NOT NULL CHECK(generation>=0), token_hash TEXT, initial_kernel_id TEXT,
+                    phase TEXT NOT NULL CHECK(phase IN ('provisioning','ready','claimed','active','deleting','reconciliation','destroyed')),
+                    reason TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                    CHECK((kind='warm' AND notebook_id IS NULL) OR (kind='assigned' AND notebook_id IS NOT NULL)))''')
+                if existing.get('version') == '1':
+                    self.db.execute('''INSERT INTO allocations SELECT runtime_id, notebook_id, notebook_id, 'assigned',
+                        owner_id, provider, profile_id, cpu, memory, pids, image, handler, generation, token_hash,
+                        NULL, phase, reason, created_at, updated_at FROM allocations_v1''')
+                    self.db.execute('DROP TABLE allocations_v1')
                 self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS live_notebook ON allocations(notebook_id) WHERE phase!='destroyed'")
-                expected = {'version': '1', 'scope': json.dumps(scope, sort_keys=True)}
-                existing = dict(self.db.execute('SELECT key,value FROM metadata').fetchall())
-                if existing and any(existing.get(k) != v for k, v in expected.items()):
-                    raise RuntimeErrorBase('Registry schema or containerd scope differs; operator reconciliation required')
                 if not existing:
-                    for key, value in {**expected, 'owner_id': uuid.uuid4().hex}.items():
+                    for key, value in {'scope': binding, 'owner_id': uuid.uuid4().hex}.items():
                         self.db.execute('INSERT INTO metadata VALUES (?,?)', (key, value))
+                self.db.execute("INSERT OR REPLACE INTO metadata VALUES ('version','2')")
                 self.owner_id = self.db.execute("SELECT value FROM metadata WHERE key='owner_id'").fetchone()[0]
             directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
@@ -80,15 +91,43 @@ class RuntimeRegistry:
             self.db.rollback()
             raise
 
-    def create(self, notebook, identity, profile, resources, config):
+    def create(self, notebook, identity, profile, resources, config, *, warm=False):
         validate_resources(resources)
         now = time.time()
         with self.transaction():
-            self.db.execute('''INSERT INTO allocations VALUES
-                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                (identity, notebook, self.owner_id, 'containerd', profile, resources.cpu_cores,
+            self.db.execute('''INSERT INTO allocations
+                (runtime_id,allocation_key,notebook_id,kind,owner_id,provider,profile_id,cpu,memory,pids,
+                 image,handler,generation,token_hash,initial_kernel_id,phase,reason,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (identity, identity if warm else notebook, None if warm else notebook,
+                 'warm' if warm else 'assigned', self.owner_id, 'containerd', profile, resources.cpu_cores,
                  resources.memory_bytes, resources.pids_limit, config.image, config.handler,
-                 0, None, 'provisioning', None, now, now))
+                 0, None, None, 'provisioning', None, now, now))
+
+    @staticmethod
+    def key(row):
+        return ('warm', row['runtime_id']) if row['kind'] == 'warm' else row['notebook_id']
+
+    def claim(self, identity, notebook):
+        with self.transaction():
+            changed = self.db.execute("UPDATE allocations SET kind='assigned',notebook_id=?,phase='claimed',updated_at=? "
+                "WHERE runtime_id=? AND kind='warm' AND phase='ready'", (notebook, time.time(), identity)).rowcount
+            if changed != 1:
+                raise RuntimeErrorBase('Warm allocation is no longer claimable')
+
+    def set_initial_kernel(self, identity, kernel_id):
+        with self.transaction():
+            row = self.get(identity)
+            if row['kind'] != 'assigned' or row['phase'] != 'claimed':
+                raise RuntimeErrorBase('Kernel bootstrap requires a durably claimed notebook')
+            self.db.execute('UPDATE allocations SET initial_kernel_id=? WHERE runtime_id=?', (kernel_id, identity))
+
+    def consume_initial_kernel(self, identity, kernel_id):
+        with self.transaction():
+            changed = self.db.execute("UPDATE allocations SET initial_kernel_id=NULL WHERE runtime_id=? AND initial_kernel_id=? AND phase IN ('active','claimed','deleting')",
+                                      (identity, kernel_id)).rowcount
+            if changed != 1:
+                raise RuntimeErrorBase('Initial kernel ownership changed')
 
     def transition(self, identity, phase, reason=None):
         if phase not in PHASES:
@@ -97,8 +136,12 @@ class RuntimeRegistry:
             row = self.get(identity)
             if row is None or (row['phase'] == 'destroyed' and phase != 'destroyed'):
                 raise RuntimeErrorBase('Invalid durable lifecycle transition')
-            if phase == 'active' and (row['generation'] < 1 or not row['token_hash'] or row['phase'] == 'deleting'):
+            if phase in {'active', 'ready'} and (row['generation'] < 1 or not row['token_hash'] or row['phase'] == 'deleting'):
                 raise RuntimeErrorBase('Incomplete runtime cannot become active')
+            if phase == 'ready' and row['kind'] != 'warm':
+                raise RuntimeErrorBase('Assigned runtimes cannot return to the warm pool')
+            if phase == 'active' and row['kind'] != 'assigned':
+                raise RuntimeErrorBase('Unassigned runtimes cannot become active notebooks')
             self.db.execute('UPDATE allocations SET phase=?,reason=?,updated_at=? WHERE runtime_id=?',
                             (phase, reason, time.time(), identity))
 
@@ -107,7 +150,7 @@ class RuntimeRegistry:
             row = self.get(identity)
             if row is None or row['phase'] not in {'provisioning', 'active'} or generation != row['generation'] + 1:
                 raise RuntimeErrorBase('Invalid durable runtime generation')
-            self.db.execute("UPDATE allocations SET generation=?,token_hash=?,phase='provisioning',updated_at=? WHERE runtime_id=?",
+            self.db.execute("UPDATE allocations SET generation=?,token_hash=?,initial_kernel_id=NULL,phase='provisioning',updated_at=? WHERE runtime_id=?",
                             (generation, hashlib.sha256(token.encode()).hexdigest(), time.time(), identity))
 
     def new_session(self):
@@ -123,8 +166,12 @@ class RuntimeRegistry:
     def records(self):
         rows = [dict(row) for row in self.db.execute("SELECT * FROM allocations WHERE phase!='destroyed' ORDER BY created_at")]
         for row in rows:
+            if ((row['kind'] == 'warm' and (row['phase'] in {'claimed', 'active'} or row['initial_kernel_id'] is not None))
+                    or (row['kind'] == 'assigned' and row['phase'] == 'ready')):
+                raise RuntimeErrorBase('Ambiguous warm/assigned lifecycle; operator reconciliation required')
             if (row['owner_id'] != self.owner_id or not re.fullmatch(r'europa-[a-f0-9]{32}', row['runtime_id'])
-                    or not row['notebook_id'].strip() or len(row['notebook_id']) > 128
+                    or (row['kind'] == 'assigned' and (not row['notebook_id'].strip() or len(row['notebook_id']) > 128))
+                    or not row['allocation_key'].strip()
                     or row['provider'] != 'containerd' or row['handler'] not in {'runc', 'runsc'}):
                 raise RuntimeErrorBase('Invalid durable identity; operator reconciliation required')
             self.resources(row)

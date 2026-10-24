@@ -15,7 +15,7 @@ from runtime.local import LocalRuntimeProvider
 from runtime.supervisor import RuntimeSupervisor
 from runtime.admission_config import configured_admission
 from runtime.registry import RuntimeRegistry
-from runtime.recovery import RecoveringRuntimeSupervisor
+from runtime.prewarming import PrewarmingRuntimeSupervisor
 
 
 def create_app(*, gateway_url: str | None = None, gateway_token: str | None = None,
@@ -54,7 +54,9 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
                 registry_path = Path(os.environ.get('EUROPA_RUNTIME_REGISTRY',
                     str(Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / 'europa/runtime.sqlite3')))
                 registry = RuntimeRegistry(registry_path, provider.recovery_scope())
-                supervisor = RecoveringRuntimeSupervisor(provider, admission, registry)
+                supervisor = PrewarmingRuntimeSupervisor(provider, admission, registry,
+                    target=int(os.environ.get('EUROPA_WARM_TARGET', '1')),
+                    profile=os.environ.get('EUROPA_WARM_PROFILE'))
                 app.state.supervisor = supervisor
                 await supervisor.reconcile()
             if url:
@@ -64,7 +66,15 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
             if registry and (supervisor.recovery_blockers or 'default' in supervisor.reconciliation_notes):
                 app.state.gateway = None  # Serve reconciliation diagnostics while provisioning is denied.
             else:
-                app.state.gateway = await supervisor.client_for()
+                if registry:
+                    supervisor.startup_gateway_only = True
+                try:
+                    app.state.gateway = await supervisor.client_for()
+                finally:
+                    if registry:
+                        supervisor.startup_gateway_only = False
+            if registry:
+                supervisor.pool.schedule()
             yield
         finally:
             try:

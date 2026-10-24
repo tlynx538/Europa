@@ -78,6 +78,9 @@ class RuntimeSupervisor:
                 raise RuntimeErrorBase("Unknown runtime provider") from exc
             if self.registry and (not self.reconciled or self.recovery_blockers):
                 raise AdmissionRejected("Runtime recovery requires operator reconciliation; new admission denied")
+            warm = await self._try_warm(spec)
+            if warm is not None:
+                return warm
             if self.admission and spec.provider == "containerd":
                 return await self._ensure_admitted(spec, provider)
             if spec.resource_profile is not None:
@@ -105,6 +108,9 @@ class RuntimeSupervisor:
                 self.notebooks.pop(spec.notebook_id, None)
                 raise
             return handle
+
+    async def _try_warm(self, spec):
+        return None
 
     @staticmethod
     async def _settle(coroutine):

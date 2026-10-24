@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -130,6 +131,16 @@ func regexpEpoch(value string) bool {
 		}
 	}
 	return true
+}
+
+func emptyWorkspace(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	entries, err := file.ReadDir(1)
+	return len(entries) == 0 && err == io.EOF
 }
 
 func emit(result map[string]interface{}, err error) {
@@ -280,6 +291,7 @@ func dispatch(ctx context.Context, client *containerd.Client, r request) (map[st
 			return nil, err
 		}
 		result["private_ip"] = network.IP
+		result["workspace_empty"] = emptyWorkspace(fmt.Sprintf("/proc/%d/root/workspace", task.Pid()))
 		for _, value := range s.Process.Env {
 			if strings.HasPrefix(value, "KG_AUTH_TOKEN=") {
 				result["token"] = strings.TrimPrefix(value, "KG_AUTH_TOKEN=")

@@ -19,7 +19,7 @@ Europa has no end-user authentication and must remain on loopback. The container
 adapter is opt-in and requires approved Linux infrastructure. Runc is its default
 OCI handler; experimental runsc is deferred due to its independently reproduced
 [upstream exit-status problem](docs/gvisor-exit-status-investigation.md).
-No prewarming, MCP, or frontend is implemented.
+Clean containerd+runc prewarming is configurable. MCP and a frontend are not implemented.
 
 ## Reproducible environment
 
@@ -205,7 +205,7 @@ digest-pinned Gateway image, actual tests and benchmarks, and Linux prerequisite
 Real runc tests run inside Linux using `--run-containerd` and explicit operator
 configuration; `-k runc` selects the 14 runc scenarios while runsc is deferred.
 Local development remains the fallback when `EUROPA_RUNTIME_PROVIDER` is unset.
-No warm pool or MCP integration is included.
+The Step 2B implementation is extended by the clean warm pool below; MCP remains outside scope.
 
 Step 2C adds [single-node resource admission](docs/resource-admission.md) to managed
 containerd notebooks: configurable CPU/memory/PID profiles, detected Linux capacity,
@@ -221,6 +221,14 @@ operations. Set `EUROPA_RUNTIME_REGISTRY` to private persistent local storage.
 Durable containerd shutdown preserves runtimes; explicitly delete them through
 `DELETE /api/runtime?notebook_id=A`. `GET /api/runtime/recovery` reports blockers
 and operator states. Local process adoption remains unsupported.
+
+Step 2E adds [clean runtime prewarming](docs/runtime-prewarming.md): a fully reserved,
+durably unassigned Gateway with zero kernels and an empty workspace. The default
+`EUROPA_WARM_TARGET=1` keeps at most one ready container when capacity permits;
+`0` disables and reclaims the unassigned pool. `EUROPA_WARM_PROFILE` selects its
+resource profile. Claims commit atomically before kernel startup, and assigned
+containers never return to the pool. `GET /api/runtime/pool` reports readiness,
+capacity deferrals and resource accounting. Local development has no warm pool.
 
 See `docs/phase2-review.md` for migration results and limitations. Original code remains
 at Git commit `c35de54ebdb282799c58239230f7e09e4c7f6680`.

@@ -44,7 +44,7 @@ class RecoveringRuntimeSupervisor(RuntimeSupervisor):
         provider = self.providers['containerd']
         rows = self.registry.records()
         for row in rows:
-            await self.admission.restore(row['notebook_id'], row['profile_id'], self.registry.resources(row))
+            await self.admission.restore(self.registry.key(row), row['profile_id'], self.registry.resources(row))
         try:
             inventory = await provider.recovery_inventory(begin_recovery=True)
             validate_inventory(inventory)
@@ -60,14 +60,14 @@ class RecoveringRuntimeSupervisor(RuntimeSupervisor):
             self.reconciled = True
             return
         for row in rows:
-            identity, name = row['runtime_id'], row['notebook_id']
+            identity, name = row['runtime_id'], self.registry.key(row)
             self._lock(name)
             if identity not in set(containers) | set(snapshots) | tasks | states:
                 # A complete authoritative inventory proves there is nothing left to own.
                 self.registry.transition(identity, 'destroyed', 'Confirmed absent during startup inventory')
                 await self.admission.release(name)
                 continue
-            labels = {'europa.runtime_id': identity, 'europa.notebook_id': name,
+            labels = {'europa.runtime_id': identity, 'europa.notebook_id': row['allocation_key'],
                       'europa.owner_id': self.registry.owner_id}
             objects = [o for o in [containers.get(identity), snapshots.get(identity)] if o]
             if not objects or any(any(obj['labels'].get(k) != v for k, v in labels.items()) for obj in objects):
@@ -81,9 +81,9 @@ class RecoveringRuntimeSupervisor(RuntimeSupervisor):
                 continue
             self._cleanup_allowed.add(name)
             self._allocations[name] = (provider, {identity})
-            if row['phase'] in {'deleting', 'reconciliation'} or not container:
+            if row['phase'] in {'deleting', 'reconciliation', 'claimed'} or not container:
                 provider.restore_record(row)
-                if row['phase'] == 'deleting':
+                if row['phase'] == 'deleting' or row['kind'] == 'warm':
                     try:
                         await self.destroy_notebook(name)
                     except Exception:
@@ -97,24 +97,43 @@ class RecoveringRuntimeSupervisor(RuntimeSupervisor):
                 self._clients[identity] = client
                 await client.__aenter__()
                 await client.health()
-                await client.recover_kernels()
-                self.registry.transition(identity, 'active')
+                if row['kind'] == 'warm':
+                    await provider.verify_clean_workspace(row)
+                    if await client.list_kernels() != []:
+                        raise RuntimeErrorBase('Unassigned Gateway is contaminated by a kernel')
+                    self.registry.transition(identity, 'ready')
+                else:
+                    await client.recover_kernels()
+                    if row['initial_kernel_id']:
+                        model = await client.inspect_kernel(row['initial_kernel_id'])
+                        client.offer_initial_kernel(model, lambda identity=identity, kernel=row['initial_kernel_id']:
+                            self.registry.consume_initial_kernel(identity, kernel))
+                    self.registry.transition(identity, 'active')
                 self.handles[identity] = handle
                 self.notebooks[name] = identity
                 self._generations[identity] = handle.generation
-                await self.admission.activate(name)
+                if row['kind'] == 'warm':
+                    await self.admission.warm_ready(name)
+                else:
+                    await self.admission.activate(name)
             except Exception:
                 client = self._clients.pop(identity, None)
                 if client:
                     await client.disconnect()
                 provider.restore_record(row)
+                if row['kind'] == 'warm':
+                    try:
+                        await self._settle(self._destroy_admitted(name))
+                        continue
+                    except Exception:
+                        pass
                 self._quarantine(row, 'Surviving runtime identity, limits or Gateway readiness could not be verified',
                                  global_block=True)
         self.reconciled = True
 
     def _quarantine(self, row, reason, *, global_block=False):
         self.registry.transition(row['runtime_id'], 'reconciliation', reason)
-        self.reconciliation_notes[row['notebook_id']] = reason
+        self.reconciliation_notes[self.registry.key(row)] = reason
         if global_block:
             self.recovery_blockers.append(reason)
 
@@ -126,7 +145,8 @@ class RecoveringRuntimeSupervisor(RuntimeSupervisor):
     async def inspect(self, runtime_id):
         status = await super().inspect(runtime_id)
         if not status.ready:
-            name = status.handle.notebook_id
+            name = self.registry.key(self.registry.get(runtime_id))
+            await self.admission.retain(name)
             self.registry.transition(runtime_id, 'reconciliation', 'Runtime failed a live readiness check')
             self.reconciliation_notes[name] = 'Runtime failed a live readiness check; explicit destruction required'
             self._cleanup_allowed.add(name)
@@ -135,15 +155,16 @@ class RecoveringRuntimeSupervisor(RuntimeSupervisor):
     async def destroy_notebook(self, notebook_id):
         if notebook_id in self.reconciliation_notes and notebook_id not in self._cleanup_allowed:
             raise RuntimeErrorBase('Ownership is inconsistent; automatic destruction is forbidden')
-        if notebook_id not in self._allocations and any(row['notebook_id'] == notebook_id for row in self.registry.records()):
+        if notebook_id not in self._allocations and any(self.registry.key(row) == notebook_id for row in self.registry.records()):
             raise RuntimeErrorBase('Durable ownership has not been reconciled; destruction cannot be confirmed')
         await super().destroy_notebook(notebook_id)
         self.reconciliation_notes.pop(notebook_id, None)
 
     async def recovery_status(self):
         return {'reconciled': self.reconciled, 'new_admissions_blocked': bool(self.recovery_blockers) or not self.reconciled,
-                'blockers': list(self.recovery_blockers), 'notebooks': dict(self.reconciliation_notes),
-                'records': [{k: row[k] for k in ('notebook_id', 'runtime_id', 'provider', 'generation', 'phase', 'reason')}
+                'blockers': list(self.recovery_blockers),
+                'notebooks': {(f'warm/{k[1]}' if isinstance(k, tuple) else k): v for k, v in self.reconciliation_notes.items()},
+                'records': [{k: row[k] for k in ('notebook_id', 'kind', 'runtime_id', 'provider', 'generation', 'phase', 'reason')}
                             for row in self.registry.records()]}
 
     async def admission_status(self):

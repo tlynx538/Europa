@@ -62,7 +62,7 @@ class ContainerdRuntimeProvider:
         row = self.registry.get(runtime_id)
         if row is None:
             raise RuntimeErrorBase("Runtime has no durable ownership record")
-        return {"owner_id": row['owner_id'], "notebook_id": row['notebook_id'],
+        return {"owner_id": row['owner_id'], "notebook_id": row['allocation_key'],
                 "generation": row['generation']}
 
     async def recovery_inventory(self, *, begin_recovery=False):
@@ -71,13 +71,20 @@ class ContainerdRuntimeProvider:
 
     def restore_record(self, row, endpoint=None):
         resources = self.registry.resources(row)
-        spec = RuntimeSpec(row['notebook_id'], provider='containerd', resources=resources,
+        name = row['notebook_id'] if row['kind'] == 'assigned' else row['allocation_key']
+        spec = RuntimeSpec(name, provider='containerd', resources=resources,
                            allocation_id=row['runtime_id'])
-        handle = RuntimeHandle(row['runtime_id'], 'containerd', row['notebook_id'], endpoint,
+        handle = RuntimeHandle(row['runtime_id'], 'containerd', name, endpoint,
             row['generation'], RuntimeState.READY if endpoint else RuntimeState.FAILED,
             datetime.fromtimestamp(row['created_at'], timezone.utc).isoformat())
         self._runtimes[row['runtime_id']] = _Container(spec, handle)
         return handle
+
+    async def verify_clean_workspace(self, row):
+        info = await self.backend.request('recovery_info', row['runtime_id'],
+                                           **self.ownership_parameters(row['runtime_id']))
+        if not info.get('workspace_empty'):
+            raise RuntimeErrorBase('Warm runtime workspace is not verified empty')
 
     async def recover(self, row):
         identity = row['runtime_id']

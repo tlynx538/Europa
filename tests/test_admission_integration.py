@@ -177,6 +177,7 @@ async def test_real_admission_http(sandbox, monkeypatch, tmp_path):
     provider, _ = sandbox
     await provider.assert_empty_namespace()
     monkeypatch.setenv('EUROPA_RUNTIME_PROVIDER', 'containerd')
+    monkeypatch.setenv('EUROPA_WARM_TARGET', '0')
     # Durable control-plane shutdown preserves containers; this test owns a private registry.
     monkeypatch.setenv('EUROPA_RUNTIME_REGISTRY', str(tmp_path / 'registry/runtime.sqlite3'))
     monkeypatch.delenv('EUROPA_GATEWAY_URL', raising=False)

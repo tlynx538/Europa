@@ -47,6 +47,7 @@ class GatewayClient:
         self._owned: set[str] = set()
         self._busy: set[str] = set()
         self._closing = False
+        self._initial_kernel = None
 
     async def __aenter__(self):
         self._session = aiohttp.ClientSession(
@@ -79,6 +80,7 @@ class GatewayClient:
             await self._session.close()
             self._session = None
         self._owned.clear()
+        self._initial_kernel = None
 
     async def recover_kernels(self):
         """Only after exclusive runtime/notebook/credential ownership is verified.
@@ -130,6 +132,14 @@ class GatewayClient:
     async def health(self):
         return await self._request("GET", "/api/kernelspecs")
 
+    async def list_kernels(self):
+        return await self._request('GET', '/api/kernels')
+
+    def offer_initial_kernel(self, model, consume):
+        """Deliver an assigned runtime's bootstrapped kernel through the existing start API."""
+        self._known(model['id'])
+        self._initial_kernel = (model, consume)
+
     def _known(self, kernel_id: str):
         if self._closing:
             raise GatewayError("Gateway client is closing", 503)
@@ -145,6 +155,23 @@ class GatewayClient:
     async def create_kernel(self, name: str = "python3"):
         if self._closing:
             raise GatewayError("Gateway client is closing", 503)
+        if self._initial_kernel and self._initial_kernel[0]['name'] == name:
+            model, consume = self._initial_kernel
+            kernel_id = model['id']
+            self._admit(kernel_id)
+            try:
+                await self.wait_ready(kernel_id)
+                current = await self.inspect_kernel(kernel_id)
+                if current.get('id') != kernel_id:
+                    raise GatewayError('Initial kernel identity changed', 503)
+                consume()
+                self._initial_kernel = None
+                return current
+            except BaseException:
+                await self._abort(kernel_id)
+                raise
+            finally:
+                self._busy.discard(kernel_id)
         # env={} selects KG environment filtering instead of implicit inheritance.
         model = await self._request("POST", "/api/kernels", json={"name": name, "env": {}})
         kernel_id = model["id"]
@@ -182,6 +209,9 @@ class GatewayClient:
         except GatewayError as exc:
             if exc.status_code != 404:
                 raise
+        if self._initial_kernel and self._initial_kernel[0]['id'] == kernel_id:
+            self._initial_kernel[1]()
+            self._initial_kernel = None
         self._owned.discard(kernel_id)
 
     async def terminate_kernel(self, kernel_id: str):

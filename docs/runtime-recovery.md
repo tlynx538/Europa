@@ -1,5 +1,10 @@
 # Step 2D: durable single-node runtime ownership
 
+Step 2E extends this baseline with [clean runtime prewarming](runtime-prewarming.md),
+transactional schema-version-2 migration and a separate immutable allocation label
+versus mutable notebook binding. The validation and Step 2D boundaries below remain
+the historical starting point; current pool lifecycle and operation are in that report.
+
 Implemented on `feature/runtime-recovery`, based on
 `9a064c5e57e1558c3cb7a6cc14399228a1149729`. The implementation commit is recorded in
 Git history and the completion response. SQLite from Python's standard library is

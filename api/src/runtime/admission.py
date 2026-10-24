@@ -132,13 +132,15 @@ class AdmissionController:
                 "admission_rejections": self.rejections,
                 "reservation_cleanup_failures": self.cleanup_failures}
 
-    async def reserve(self, key, spec):
+    async def reserve(self, key, spec, *, eligible=None):
         async with self._lock:
             try:
                 profile, resources = self.profiles.resolve(spec)
                 if key in self._reservations:
                     raise AdmissionRejected("Notebook already has a reservation; cleanup is required")
                 observed = await self._capacity()
+                if eligible is not None and not eligible():
+                    raise AdmissionRejected('Foreground provisioning has priority over prewarming')
                 available = self._metrics(observed)["available_admission"]
                 if resources.memory_bytes > available["memory_bytes"]:
                     raise AdmissionRejected("Insufficient memory after host reserve and notebook reservations")
@@ -154,6 +156,19 @@ class AdmissionController:
         async with self._lock:
             profile, resources, _ = self._reservations[key]
             self._reservations[key] = (profile, resources, "active")
+
+    async def warm_ready(self, key):
+        async with self._lock:
+            profile, resources, _ = self._reservations[key]
+            self._reservations[key] = (profile, resources, 'warm_ready')
+
+    async def claim(self, key, notebook, persist):
+        async with self._lock:
+            if notebook in self._reservations or key not in self._reservations:
+                raise AdmissionRejected('Duplicate or missing reservation during warm assignment')
+            persist()  # Synchronous SQLite commit; no cancellation point before transfer.
+            profile, resources, _ = self._reservations.pop(key)
+            self._reservations[notebook] = (profile, resources, 'starting')
 
     async def restore(self, key, profile, resources):
         """Restore occupied capacity even when it exceeds today's admission budget."""

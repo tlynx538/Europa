@@ -1,5 +1,9 @@
 # Step 2C: single-node resource admission
 
+Step 2E's [clean runtime pool](runtime-prewarming.md) uses these same full resource
+reservations, including unassigned containers. It does not substitute idle usage
+for an admitted limit or bypass capacity checks.
+
 Step 2D supersedes this milestone's in-memory recovery boundary and empty-namespace
 startup rule with [durable ownership and reconciliation](runtime-recovery.md).
 Profiles, reserve arithmetic, limits and admission behavior below remain applicable;
