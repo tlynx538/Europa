@@ -206,6 +206,14 @@ configuration; `-k runc` selects the 14 runc scenarios while runsc is deferred.
 Local development remains the fallback when `EUROPA_RUNTIME_PROVIDER` is unset.
 No warm pool or MCP integration is included.
 
+Step 2C adds [single-node resource admission](docs/resource-admission.md) to managed
+containerd notebooks: configurable CPU/memory/PID profiles, detected Linux capacity,
+host reserves, atomic reservations, verified limits and cleanup-aware release.
+The default profile is 0.5 CPU, 512 MiB and 128 PIDs. Use
+`POST /api/runtime/provision?notebook_id=A&resource_profile=PROFILE` to select a
+configured profile and `GET /api/runtime/admission` for accounting metrics.
+Local development retains its existing behavior and has no enforced resource budget.
+
 See `docs/phase2-review.md` for migration results and limitations. Original code remains
 at Git commit `c35de54ebdb282799c58239230f7e09e4c7f6680`.
 `docs/modularOverview.png` is historical, not the current architecture.

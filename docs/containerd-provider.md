@@ -4,6 +4,9 @@ Current strategy: containerd defaults to **runc**, local remains the development
 fallback, and experimental runsc is deferred. Actual ARM64 image/provider tests
 and resource-enforcement results are in [the runc validation report](step2b-runc-validation.md).
 The implementation review and earlier unverified results below are historical.
+Step 2C's current profile defaults, admission configuration and validation are in
+[resource admission](resource-admission.md); its complete legacy resource-variable
+trio remains supported as an override of the default profile.
 
 Implemented on `feature/containerd-provider`, based on Step 2A commit
 `cd50ce8ebad6ddd674e24f46ccd4ce21c963ce57`. The final commit SHA is in the

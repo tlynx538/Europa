@@ -8,11 +8,12 @@ from fastapi.responses import JSONResponse
 from internal.middleware import debug_middleware
 from internal.router import router
 from kernel.gateway_client import GatewayError
-from runtime.contracts import GatewayEndpoint, ResourceRequests, RuntimeErrorBase
+from runtime.contracts import GatewayEndpoint, RuntimeErrorBase
 from runtime.containerd import ContainerdConfig, ContainerdRuntimeProvider
 from runtime.containerd_backend import SDKBridgeBackend
 from runtime.local import LocalRuntimeProvider
 from runtime.supervisor import RuntimeSupervisor
+from runtime.admission_config import configured_admission
 
 
 def create_app(*, gateway_url: str | None = None, gateway_token: str | None = None,
@@ -23,6 +24,7 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
         token = gateway_token or os.environ.get("EUROPA_GATEWAY_TOKEN", "")
         selection = os.environ.get("EUROPA_RUNTIME_PROVIDER", "local")
         resources = None
+        admission = guard = None
         if runtime_provider is not None:
             provider = runtime_provider
             selection = "local"
@@ -31,26 +33,32 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
         elif selection == "containerd":
             if os.environ.get("EUROPA_CONTAINERD_ALLOW_NETWORK") != "1":
                 raise RuntimeErrorBase("Containerd networking requires explicit operator opt-in")
-            resources = ResourceRequests(float(os.environ["EUROPA_CONTAINERD_CPU_CORES"]),
-                int(os.environ["EUROPA_CONTAINERD_MEMORY_BYTES"]), int(os.environ["EUROPA_CONTAINERD_PIDS_LIMIT"]))
             backend = SDKBridgeBackend(Path(os.environ["EUROPA_CONTAINERD_BRIDGE"]),
                 socket=os.environ.get("EUROPA_CONTAINERD_SOCKET", "/run/containerd/containerd.sock"),
                 cni_config=os.environ["EUROPA_CONTAINERD_CNI_CONFIG"],
                 cni_bin=os.environ.get("EUROPA_CONTAINERD_CNI_BIN", "/opt/cni/bin"))
             provider = ContainerdRuntimeProvider(backend, ContainerdConfig(
                 os.environ["EUROPA_CONTAINERD_IMAGE"], os.environ.get("EUROPA_CONTAINERD_HANDLER", "runc")))
+            admission, guard = configured_admission(backend.socket)
         else:
             raise RuntimeErrorBase("Unknown runtime provider selection")
         supervisor = RuntimeSupervisor({selection: provider}, default_provider=selection,
-                                       default_resources=resources)
+                                       default_resources=resources, admission=admission)
         app.state.supervisor = supervisor
         try:
+            if guard:
+                guard.acquire()
+                await provider.assert_empty_namespace()
             if url:
                 await supervisor.attach("default", GatewayEndpoint(url, token))
             app.state.gateway = await supervisor.client_for()
             yield
         finally:
-            await supervisor.close()
+            try:
+                await supervisor.close()
+            finally:
+                if guard:
+                    guard.close()
 
     app = FastAPI(lifespan=lifespan)
 

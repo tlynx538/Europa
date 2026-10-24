@@ -67,9 +67,15 @@ async def runtime_status(request: Request, notebook_id: str = "default"):
 
 
 @router.post("/runtime/provision", status_code=201)
-async def provision_runtime(request: Request, notebook_id: Annotated[str, Query(min_length=1, max_length=128, pattern=r".*\S.*")]):
-    await request.app.state.supervisor.client_for(notebook_id)
+async def provision_runtime(request: Request, notebook_id: Annotated[str, Query(min_length=1, max_length=128, pattern=r".*\S.*")],
+                            resource_profile: Annotated[str | None, Query(min_length=1, max_length=64, pattern=r".*\S.*")] = None):
+    await request.app.state.supervisor.client_for(notebook_id, resource_profile=resource_profile)
     return await request.app.state.supervisor.status_for(notebook_id)
+
+
+@router.get("/runtime/admission")
+async def admission_status(request: Request):
+    return await request.app.state.supervisor.admission_status()
 
 
 @router.delete("/runtime", status_code=204)

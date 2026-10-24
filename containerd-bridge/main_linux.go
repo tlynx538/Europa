@@ -83,6 +83,33 @@ func owned(ctx context.Context, client *containerd.Client, id string) (container
 
 func dispatch(ctx context.Context, client *containerd.Client, r request) (map[string]interface{}, error) {
 	switch r.Operation {
+	case "managed_inventory":
+		// Admission starts only from an empty managed namespace. Never delete
+		// unknown allocations or infer that untracked workloads have no cost.
+		cs, err := client.Containers(ctx)
+		if err != nil {
+			return nil, err
+		}
+		ts, err := client.TaskService().List(ctx, &taskapi.ListTasksRequest{})
+		if err != nil {
+			return nil, err
+		}
+		count := 0
+		err = client.SnapshotService("overlayfs").Walk(ctx, func(ctx context.Context, info snapshots.Info) error {
+			if info.Labels["europa.runtime_id"] != "" || strings.HasSuffix(info.Name, "-rootfs") {
+				count++
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		entries, err := os.ReadDir(r.StateRoot)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		return map[string]interface{}{"containers": len(cs), "tasks": len(ts.Tasks),
+			"snapshots": count, "state_directories": len(entries)}, nil
 	case "image":
 		started := time.Now()
 		image, err := client.GetImage(ctx, r.Image)

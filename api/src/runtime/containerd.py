@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import aiohttp
 
 from runtime.containerd_backend import ContainerdBackend
+from runtime.admission import validate_resources
 from runtime.contracts import (
     GatewayEndpoint, ResourceRequests, RuntimeErrorBase, RuntimeHandle, RuntimeSpec,
     RuntimeState, RuntimeStatus,
@@ -49,6 +50,10 @@ class ContainerdRuntimeProvider:
 
     @staticmethod
     def _validate_resources(resources: ResourceRequests | None):
+        try:
+            validate_resources(resources)
+        except ValueError as exc:
+            raise RuntimeErrorBase(str(exc)) from exc
         if (resources is None or resources.cpu_cores is None or resources.memory_bytes is None
                 or resources.pids_limit is None or not math.isfinite(resources.cpu_cores)):
             raise RuntimeErrorBase("Container runtimes require explicit CPU, memory, and PID limits")
@@ -63,7 +68,9 @@ class ContainerdRuntimeProvider:
             raise RuntimeErrorBase("Host working-directory mounts are not supported")
         if set(spec.environment) - {"LANG", "LC_ALL"}:
             raise RuntimeErrorBase("Container environment accepts only locale overrides")
-        runtime_id = f"europa-{uuid.uuid4().hex}"
+        runtime_id = spec.allocation_id or f"europa-{uuid.uuid4().hex}"
+        if not re.fullmatch(r"europa-[a-f0-9]{32}", runtime_id) or runtime_id in self._runtimes:
+            raise RuntimeErrorBase("Invalid or duplicate runtime allocation identity")
         handle = RuntimeHandle(runtime_id, "containerd", spec.notebook_id, None, 0,
                                RuntimeState.STOPPED, datetime.now(timezone.utc).isoformat())
         record = _Container(replace(spec, environment=dict(spec.environment)), handle)
@@ -86,6 +93,12 @@ class ContainerdRuntimeProvider:
         except BaseException:
             await self._cleanup(self.destroy(runtime_id))
             raise
+
+    async def assert_empty_namespace(self):
+        inventory = await self.backend.request("managed_inventory", "europa-" + "0" * 32)
+        expected = {"containers": 0, "tasks": 0, "snapshots": 0, "state_directories": 0}
+        if inventory != expected:
+            raise RuntimeErrorBase("Existing containerd allocations require operator reconciliation before admission")
 
     async def _ready(self, record):
         endpoint = record.handle.endpoint
