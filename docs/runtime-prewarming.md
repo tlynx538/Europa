@@ -1,5 +1,8 @@
 # Step 2E: clean runtime prewarming
 
+Step 2F adds [durable activity leases and idle cleanup](runtime-lifecycle.md) to assigned
+containerd runtimes. Unassigned warm resources retain their separate pool policy.
+
 Implemented on `feature/runtime-prewarming`, based on
 `21dd42a5029e369b0210b92b40c8803561da22d0`. The implementation commit is recorded in
 Git history and the completion response. The existing containerd+runc provider,

@@ -1,5 +1,8 @@
 # Step 2D: durable single-node runtime ownership
 
+Step 2F adds [durable activity leases and idle cleanup](runtime-lifecycle.md) to assigned
+containerd runtimes. Unassigned warm resources retain their separate pool policy.
+
 Step 2E extends this baseline with [clean runtime prewarming](runtime-prewarming.md),
 transactional schema-version-2 migration and a separate immutable allocation label
 versus mutable notebook binding. The validation and Step 2D boundaries below remain

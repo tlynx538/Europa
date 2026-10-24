@@ -46,7 +46,7 @@ class RuntimeRegistry:
                 self.db.execute('CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
                 existing = dict(self.db.execute('SELECT key,value FROM metadata').fetchall())
                 binding = json.dumps(scope, sort_keys=True)
-                if existing and (existing.get('scope') != binding or existing.get('version') not in {'1', '2'}):
+                if existing and (existing.get('scope') != binding or existing.get('version') not in {'1', '2', '3'}):
                     raise RuntimeErrorBase('Registry schema or containerd scope differs; operator reconciliation required')
                 if existing.get('version') == '1':
                     self.db.execute('DROP INDEX IF EXISTS live_notebook')
@@ -70,7 +70,20 @@ class RuntimeRegistry:
                 if not existing:
                     for key, value in {'scope': binding, 'owner_id': uuid.uuid4().hex}.items():
                         self.db.execute('INSERT INTO metadata VALUES (?,?)', (key, value))
-                self.db.execute("INSERT OR REPLACE INTO metadata VALUES ('version','2')")
+                if existing.get('version') == '3':
+                    tables = {r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    if not {'activity', 'operations', 'leases'} <= tables:
+                        raise RuntimeErrorBase('Activity journal is incomplete; operator reconciliation required')
+                self.db.execute("""CREATE TABLE IF NOT EXISTS activity (
+                    runtime_id TEXT PRIMARY KEY, last_activity REAL NOT NULL,
+                    stop_requested REAL, idle_candidate REAL)""")
+                self.db.execute("""CREATE TABLE IF NOT EXISTS operations (
+                    id TEXT PRIMARY KEY, runtime_id TEXT NOT NULL, generation INTEGER NOT NULL,
+                    kind TEXT NOT NULL, started REAL NOT NULL)""")
+                self.db.execute("""CREATE TABLE IF NOT EXISTS leases (
+                    token_hash TEXT PRIMARY KEY, runtime_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL, kind TEXT NOT NULL, expires REAL NOT NULL)""")
+                self.db.execute("INSERT OR REPLACE INTO metadata VALUES ('version','3')")
                 self.owner_id = self.db.execute("SELECT value FROM metadata WHERE key='owner_id'").fetchone()[0]
             directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
@@ -152,6 +165,64 @@ class RuntimeRegistry:
                 raise RuntimeErrorBase('Invalid durable runtime generation')
             self.db.execute("UPDATE allocations SET generation=?,token_hash=?,initial_kernel_id=NULL,phase='provisioning',updated_at=? WHERE runtime_id=?",
                             (generation, hashlib.sha256(token.encode()).hexdigest(), time.time(), identity))
+
+    def activity(self, identity, now):
+        # Initialization is conservative on upgrades: give verified old notebooks a full timeout.
+        row = self.db.execute('SELECT * FROM activity WHERE runtime_id=?', (identity,)).fetchone()
+        if row is None:
+            with self.transaction():
+                self.db.execute('INSERT INTO activity(runtime_id,last_activity) VALUES (?,?)', (identity, now))
+            row = self.db.execute('SELECT * FROM activity WHERE runtime_id=?', (identity,)).fetchone()
+        row = dict(row)
+        row['operations'] = self.db.execute('SELECT COUNT(*) FROM operations WHERE runtime_id=?', (identity,)).fetchone()[0]
+        row['leases'] = self.db.execute('SELECT COUNT(*) FROM leases WHERE runtime_id=? AND expires>?', (identity, now)).fetchone()[0]
+        row['active_executions'] = self.db.execute("SELECT COUNT(*) FROM operations WHERE runtime_id=? AND kind='execute'", (identity,)).fetchone()[0]
+        row['sessions'] = {kind: self.db.execute('SELECT COUNT(*) FROM leases WHERE runtime_id=? AND kind=? AND expires>?',
+                          (identity, kind, now)).fetchone()[0] for kind in ('interactive', 'agent')}
+        return row
+
+    def unfinished(self, identity):
+        return bool(self.db.execute('SELECT 1 FROM operations WHERE runtime_id=? LIMIT 1', (identity,)).fetchone())
+
+    def begin_operation(self, identity, generation, kind, now):
+        operation = uuid.uuid4().hex
+        with self.transaction():
+            row = self.get(identity)
+            if not row or row['kind'] != 'assigned' or row['phase'] != 'active' or row['generation'] != generation:
+                raise RuntimeErrorBase('Runtime cannot accept activity in its durable state')
+            self.db.execute('INSERT OR IGNORE INTO activity(runtime_id,last_activity) VALUES (?,?)', (identity, now))
+            if kind != 'interrupt_kernel' and self.db.execute('SELECT stop_requested FROM activity WHERE runtime_id=?', (identity,)).fetchone()[0] is not None:
+                raise RuntimeErrorBase('Runtime stop has been requested')
+            self.db.execute('INSERT INTO operations VALUES (?,?,?,?,?)', (operation, identity, generation, kind, now))
+        return operation
+
+    def finish_operation(self, operation, now, *, meaningful=True):
+        with self.transaction():
+            row = self.db.execute('SELECT runtime_id FROM operations WHERE id=?', (operation,)).fetchone()
+            if row is None:
+                raise RuntimeErrorBase('Operation ownership was lost')
+            self.db.execute('DELETE FROM operations WHERE id=?', (operation,))
+            if meaningful:
+                self.db.execute('UPDATE activity SET last_activity=MAX(last_activity,?),idle_candidate=NULL WHERE runtime_id=?', (now, row[0]))
+
+    def lifecycle_mark(self, identity, field, now):
+        if field not in {'stop_requested', 'idle_candidate'}:
+            raise ValueError('Invalid activity field')
+        with self.transaction():
+            self.db.execute(f'UPDATE activity SET {field}=? WHERE runtime_id=?', (now, identity))
+
+    def add_lease(self, identity, generation, kind, expires, token_hash, now):
+        with self.transaction():
+            self.db.execute('DELETE FROM leases WHERE expires<=?', (now,))
+            count = self.db.execute('SELECT COUNT(*) FROM leases WHERE runtime_id=?', (identity,)).fetchone()[0]
+            if count >= 32:
+                raise RuntimeErrorBase('Session lease limit reached')
+            self.db.execute('INSERT INTO leases VALUES (?,?,?,?,?)', (token_hash, identity, generation, kind, expires))
+
+    def release_lease(self, identity, generation, token_hash):
+        with self.transaction():
+            return self.db.execute('DELETE FROM leases WHERE runtime_id=? AND generation=? AND token_hash=?',
+                                   (identity, generation, token_hash)).rowcount == 1
 
     def new_session(self):
         epoch = uuid.uuid4().hex

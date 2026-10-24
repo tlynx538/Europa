@@ -222,6 +222,8 @@ class GatewayClient:
             self._busy.discard(kernel_id)
 
     async def _abort(self, kernel_id: str):
+        if getattr(self, '_durable_detaching', False):
+            return  # Control-plane shutdown leaves remote execution and journal uncertainty intact.
         task = asyncio.create_task(self._delete(kernel_id))
         try:
             await asyncio.shield(task)

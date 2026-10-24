@@ -16,6 +16,7 @@ from runtime.supervisor import RuntimeSupervisor
 from runtime.admission_config import configured_admission
 from runtime.registry import RuntimeRegistry
 from runtime.prewarming import PrewarmingRuntimeSupervisor
+from runtime.lifecycle import IdlePolicy
 
 
 def create_app(*, gateway_url: str | None = None, gateway_token: str | None = None,
@@ -59,6 +60,7 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
                     profile=os.environ.get('EUROPA_WARM_PROFILE'))
                 app.state.supervisor = supervisor
                 await supervisor.reconcile()
+                supervisor.enable_lifecycle(IdlePolicy.environment())
             if url:
                 if registry:
                     raise RuntimeErrorBase('External Gateway attachment is not supported by the durable containerd deployment')
@@ -75,6 +77,7 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
                         supervisor.startup_gateway_only = False
             if registry:
                 supervisor.pool.schedule()
+                supervisor.lifecycle.start()
             yield
         finally:
             try:

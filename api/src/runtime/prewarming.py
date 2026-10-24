@@ -210,6 +210,8 @@ class PrewarmingRuntimeSupervisor(RecoveringRuntimeSupervisor):
         self.foreground = 0
         self.startup_gateway_only = False
         self.pool = WarmPool(self, target=target, profile=profile)
+        self.lifecycle = None
+        self._activity_clients = {}
 
     async def reconcile(self):
         await super().reconcile()
@@ -237,7 +239,28 @@ class PrewarmingRuntimeSupervisor(RecoveringRuntimeSupervisor):
             if not existing:
                 self.pool.schedule()
 
+    def enable_lifecycle(self, policy=None, *, clock=None):
+        if self.lifecycle is not None:
+            raise RuntimeErrorBase('Runtime lifecycle already configured')
+        from runtime.lifecycle import RuntimeLifecycle
+        self.lifecycle = RuntimeLifecycle(self, policy, **({'clock': clock} if clock else {}))
+        for row in self.registry.records():
+            if row['kind'] == 'assigned':
+                self.registry.activity(row['runtime_id'], self.lifecycle.clock())
+        return self.lifecycle
+
+    async def client_for(self, notebook_id='default', *, resource_profile=None):
+        client = await super().client_for(notebook_id, resource_profile=resource_profile)
+        if self.lifecycle is None:
+            return client
+        identity = self.notebooks[notebook_id]
+        if identity not in self._activity_clients:
+            self._activity_clients[identity] = self.lifecycle.gateway(notebook_id, identity, client)
+        return self._activity_clients[identity]
+
     async def destroy_notebook(self, notebook_id):
+        if self.lifecycle and isinstance(notebook_id, str):
+            return await self.lifecycle.stop(notebook_id)
         await super().destroy_notebook(notebook_id)
         self.pool.schedule()
 
@@ -246,6 +269,8 @@ class PrewarmingRuntimeSupervisor(RecoveringRuntimeSupervisor):
 
     async def close(self):
         self._closing = True
+        if self.lifecycle:
+            await self.lifecycle.close()
         try:
             await self._settle(self.pool.stop())
         finally:

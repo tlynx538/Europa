@@ -1,5 +1,6 @@
 """Single-process notebook ownership; no scheduling, prewarming, or eviction."""
 import asyncio
+import time
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ class RuntimeSupervisor:
         self._unavailable: set[str] = set()
         self._locks: dict[str, asyncio.Lock] = {}
         self._closing = False
+        self.cleanup_measurements = []
 
     def _lock(self, notebook_id):
         return self._locks.setdefault(notebook_id, asyncio.Lock())
@@ -177,6 +179,7 @@ class RuntimeSupervisor:
             raise
 
     async def _destroy_admitted(self, name):
+        started = time.monotonic()
         provider, identities = self._allocations[name]
         if self.registry:
             for identity in identities:
@@ -203,7 +206,10 @@ class RuntimeSupervisor:
             await self.admission.retain(name, cleanup_failed=True)
             raise
         # Only successful provider destruction proves the allocation no longer exists.
+        confirmed = time.monotonic()
         await self.admission.release(name)
+        self.cleanup_measurements.append({'notebook_id': name, 'destruction_seconds': confirmed - started,
+            'reservation_release_seconds': time.monotonic() - confirmed})
         for identity in identities:
             self._clients.pop(identity, None)
             self._generations.pop(identity, None)

@@ -1,5 +1,8 @@
 # Step 2C: single-node resource admission
 
+Step 2F adds [durable activity leases and idle cleanup](runtime-lifecycle.md) to assigned
+containerd runtimes. Unassigned warm resources retain their separate pool policy.
+
 Step 2E's [clean runtime pool](runtime-prewarming.md) uses these same full resource
 reservations, including unassigned containers. It does not substitute idle usage
 for an admitted limit or bypass capacity checks.

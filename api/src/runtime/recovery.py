@@ -81,6 +81,10 @@ class RecoveringRuntimeSupervisor(RuntimeSupervisor):
                 continue
             self._cleanup_allowed.add(name)
             self._allocations[name] = (provider, {identity})
+            if row['kind'] == 'assigned' and row['phase'] != 'deleting' and self.registry.unfinished(identity):
+                provider.restore_record(row)
+                self._quarantine(row, 'Unfinished notebook operation survived control-plane restart; explicit review/cleanup required', global_block=True)
+                continue
             if row['phase'] in {'deleting', 'reconciliation', 'claimed'} or not container:
                 provider.restore_record(row)
                 if row['phase'] == 'deleting' or row['kind'] == 'warm':

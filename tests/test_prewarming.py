@@ -276,7 +276,7 @@ def test_version_one_registry_migrates_ownership_without_importing_warm_state(tm
     assert row['kind'] == 'assigned' and row['phase'] == 'active' and row['generation'] == 1
     assert row['owner_id'] == 'a'*32 and row['token_hash'] == 'b'*64
     assert row['initial_kernel_id'] is None
-    assert registry.db.execute("SELECT value FROM metadata WHERE key='version'").fetchone()[0] == '2'
+    assert registry.db.execute("SELECT value FROM metadata WHERE key='version'").fetchone()[0] == '3'
     registry.close()
 
 
