@@ -132,3 +132,9 @@ async def gateway_client(local_gateway):
                 assert response.status == 200
                 assert await response.json() == []
         assert not any(alive(child) for child in local_gateway.tracked)
+
+
+@pytest.fixture(autouse=True)
+def private_notebook_storage(tmp_path, monkeypatch):
+    """Every app/child test uses disposable document storage, never the user's library."""
+    monkeypatch.setenv('EUROPA_NOTEBOOK_ROOT', str(tmp_path / 'notebooks'))

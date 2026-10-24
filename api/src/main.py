@@ -7,6 +7,9 @@ from fastapi.responses import JSONResponse
 
 from internal.middleware import debug_middleware
 from internal.router import router
+from notebooks.router import router as notebook_router
+from notebooks.store import NotebookStore, NotebookError
+from notebooks.service import NotebookService
 from kernel.gateway_client import GatewayError
 from runtime.contracts import GatewayEndpoint, RuntimeErrorBase
 from runtime.containerd import ContainerdConfig, ContainerdRuntimeProvider
@@ -29,6 +32,7 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
         resources = None
         admission = guard = None
         registry = None
+        notebook_store = notebook_service = None
         if runtime_provider is not None:
             provider = runtime_provider
             selection = "local"
@@ -50,6 +54,9 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
                                        default_resources=resources, admission=admission)
         app.state.supervisor = supervisor
         try:
+            notebook_store = NotebookStore(os.environ.get('EUROPA_NOTEBOOK_ROOT',
+                str(Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'europa/notebooks')))
+            app.state.notebook_store = notebook_store
             if guard:
                 guard.acquire()
                 registry_path = Path(os.environ.get('EUROPA_RUNTIME_REGISTRY',
@@ -78,17 +85,29 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
             if registry:
                 supervisor.pool.schedule()
                 supervisor.lifecycle.start()
+            notebook_service = NotebookService(notebook_store, supervisor)
+            app.state.notebook_service = notebook_service
             yield
         finally:
             try:
-                await supervisor.close()
+                try:
+                    if notebook_service:
+                        await notebook_service.close(supervisor.lifecycle.policy.grace if getattr(supervisor, 'lifecycle', None) else 30)
+                finally:
+                    await supervisor.close()
             finally:
+                if notebook_store:
+                    notebook_store.close()
                 if registry:
                     registry.close()
                 if guard:
                     guard.close()
 
     app = FastAPI(lifespan=lifespan)
+
+    @app.exception_handler(NotebookError)
+    async def notebook_error(_: Request, exc: NotebookError):
+        return JSONResponse(status_code=exc.status_code, content={'detail': str(exc)})
 
     @app.exception_handler(GatewayError)
     async def gateway_error(_: Request, exc: GatewayError):
@@ -104,6 +123,7 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
 
     app.middleware("http")(debug_middleware)
     app.include_router(router, prefix="/api", tags=["kernel"])
+    app.include_router(notebook_router, prefix="/api", tags=["notebooks"])
     return app
 
 

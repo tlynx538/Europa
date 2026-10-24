@@ -20,6 +20,7 @@ adapter is opt-in and requires approved Linux infrastructure. Runc is its defaul
 OCI handler; experimental runsc is deferred due to its independently reproduced
 [upstream exit-status problem](docs/gvisor-exit-status-investigation.md).
 Clean containerd+runc prewarming and durable idle cleanup are configurable.
+Standard notebook persistence and cell execution are available.
 MCP and a frontend are not implemented.
 
 ## Reproducible environment
@@ -237,6 +238,13 @@ grace and sweep intervals. `EUROPA_IDLE_CLEANUP=0` disables automatic retirement
 Active operations remain protected after HTTP disconnect; uncertain crash leftovers
 retain reservations for reconciliation. `GET /api/runtime/activity` reports activity
 and uncertainty. Unassigned warm containers keep their separate pool policy.
+
+Phase 3A adds [standard notebook persistence and cell APIs](docs/notebook-persistence.md).
+`EUROPA_NOTEBOOK_ROOT` selects private durable storage, independent of runtime
+filesystems. `/api/notebooks` supports revision-checked notebook/cell management;
+cell execution returns a durable receipt and saves standard Jupyter outputs.
+Runtime deletion leaves documents intact. Saved notebooks do not checkpoint Python
+variables; completed results conflicting with newer edits remain in their receipts.
 
 See `docs/phase2-review.md` for migration results and limitations. Original code remains
 at Git commit `c35de54ebdb282799c58239230f7e09e4c7f6680`.
