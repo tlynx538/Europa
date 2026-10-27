@@ -5,6 +5,9 @@ export class ApiError extends Error {
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
     ...init,
+    // Expiring a browser waiter does not cancel server-owned execution/mutations.
+    signal: AbortSignal.any([AbortSignal.timeout(15_000), ...(init?.signal ? [init.signal] : [])]),
+    cache: 'no-store',
     headers: { ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers },
   })
   if (!response.ok) {
@@ -20,7 +23,7 @@ export function json(method: string, body: unknown): RequestInit {
   return { method, body: JSON.stringify(body) }
 }
 
-export interface Receipt { execution_id: string; cell_id: string; state: string; result?: { status: string } }
+export interface Receipt { notebook_id?: string; execution_id: string; cell_id: string; state: string; source_hash?: string; result?: { status: string; outputs?: import('./Output').Output[]; execution_count?: number } }
 export const terminalReceipt = (state: string) => ['applied', 'conflict', 'uncertain'].includes(state)
 
 // A transport failure is not a terminal result and must never imply cancellation.

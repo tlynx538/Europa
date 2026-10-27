@@ -1,88 +1,220 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
 
-test('owner creates a notebook and project, executes and reopens saved output', async ({ page }, testInfo) => {
-  await page.goto('/')
-  page.once('dialog', d => d.accept('Browser notebook'))
-  await page.getByRole('button', { name: 'New notebook' }).click()
-  await expect(page.getByRole('heading', { name: 'Browser notebook' })).toBeVisible()
-  await page.getByRole('button', { name: '+ Code' }).click()
-  await page.locator('.cm-content').click()
-  await page.keyboard.type('print(42)')
-  await page.getByRole('button', { name: 'Save cell' }).click()
+const api = 'http://127.0.0.1:18000/api'
+async function seed(request: APIRequestContext, title: string, code = 'print(42)', cellType = 'code') {
+  const response = await request.post(`${api}/notebooks`, { data: { title } }); expect(response.status()).toBe(201)
+  const doc = await response.json(), id = doc.metadata.europa.notebook_id
+  const cellResponse = await request.post(`${api}/notebooks/${id}/cells`, { data: { revision: 1, source: code, cell_type: cellType } }); expect(cellResponse.status()).toBe(201)
+  return { id, doc: await cellResponse.json() }
+}
+async function open(page: Page, id: string) { await page.goto('/'); await page.getByLabel('Notebook', { exact: true }).selectOption(id); await expect(page.locator('.cell')).toBeVisible() }
+async function post(request: APIRequestContext, path: string, body: object) {
+  const response = await request.post(`${api}${path}`, { data: { operation_id: crypto.randomUUID(), ...body } }); expect([200, 201, 202]).toContain(response.status()); return response.json()
+}
+
+test('owner workflow, task editing, threads, anchors and refresh persistence', async ({ page, request }, info) => {
+  const { id, doc } = await seed(request, 'Owner notebook')
+  await open(page, id)
   await page.getByRole('button', { name: 'Run', exact: true }).click()
   await expect(page.getByText(/Execution: applied \(ok\)/)).toBeVisible({ timeout: 45000 })
-  await page.getByRole('button', { name: 'Reload saved notebook' }).click()
-  await expect(page.locator('.outputs')).toContainText('42')
-
-  page.once('dialog', d => d.accept('Browser project'))
-  await page.getByRole('button', { name: 'New project' }).click()
-  await expect(page.getByLabel('Project')).toHaveValue(/.+/)
-  await page.getByRole('button', { name: 'Add open notebook to project' }).click()
-  const answers = ['Investigate results', 'Inspect output', 'Owner verifies output']
-  const roadmapDialogs = async (dialog: import('@playwright/test').Dialog) => { await dialog.accept(answers.shift() ?? '') }
-  page.on('dialog', roadmapDialogs)
+  await expect(page.locator('.cell .outputs')).toContainText('42') // no manual reload
+  const project = await post(request, '/projects', { title: 'Owner project' })
+  await post(request, `/projects/${project.id}/notebooks`, { revision: 1, notebook_id: id })
+  await page.reload()
+  await page.getByLabel('Project', { exact: true }).selectOption(project.id)
+  const roadmapAnswers = ['Investigate results', 'Inspect output', 'Owner verifies output']
+  const dialogs = async (dialog: import('@playwright/test').Dialog) => { await dialog.accept(roadmapAnswers.shift() ?? '') }
+  page.on('dialog', dialogs)
   await page.getByRole('button', { name: 'Create roadmap' }).click()
-  page.off('dialog', roadmapDialogs)
-  await expect(page.getByText('Inspect output')).toBeVisible()
-  const cellId = (await page.locator('.cell').getAttribute('id'))!.slice(5)
-  const commentAnswers = [cellId, 'Check this result']
-  const commentDialogs = async (dialog: import('@playwright/test').Dialog) => { await dialog.accept(commentAnswers.shift() ?? '') }
-  page.on('dialog', commentDialogs)
+  await expect(page.getByText('Investigate results', { exact: true })).toBeVisible()
+  page.off('dialog', dialogs)
+  await page.getByText('Task details', { exact: true }).click()
+  await page.getByRole('button', { name: 'Edit task', exact: true }).click()
+  await page.getByLabel('Status', { exact: true }).selectOption('completed')
+  await page.getByLabel('I accept this task as the owner').check()
+  await page.getByLabel('Acceptance evidence (one summary per line)').fill('Owner inspected 42')
+  await page.getByRole('button', { name: 'Save task', exact: true }).click()
+  await expect(page.getByRole('progressbar', { name: 'Overall project progress' })).toHaveAttribute('value', '100')
+  page.once('dialog', d => d.accept('Check this result'))
   await page.getByRole('button', { name: 'Comment on cell' }).click()
-  page.off('dialog', commentDialogs)
   await expect(page.getByText('Check this result')).toBeVisible()
   await expect(page.getByRole('link', { name: '1 comments' })).toBeVisible()
   await page.getByRole('button', { name: 'Start discussion' }).click()
-  await page.getByLabel('Message').fill('A persisted message')
+  await page.getByLabel('Message', { exact: true }).fill('A persisted message')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect(page.getByText('A persisted message')).toBeVisible()
+  await expect(page.locator('article.message').filter({ hasText: 'A persisted message' })).toBeVisible()
+  await page.getByRole('button', { name: 'Reply to message' }).click()
+  await page.getByLabel('Message', { exact: true }).fill('Owner follow-up')
+  await page.getByLabel('Needs input', { exact: true }).check()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.locator('article.message').filter({ hasText: 'Owner follow-up' })).toBeVisible()
   await page.reload()
-  await page.getByRole('button', { name: 'Browser notebook' }).click()
-  await expect(page.locator('.outputs')).toContainText('42')
-  await page.getByLabel('Project').selectOption({ label: 'Browser project' })
-  await expect(page.getByText('A persisted message')).toBeVisible()
-  await expect(page.getByText('Inspect output')).toBeVisible()
+  await expect(page.locator('.cell .outputs')).toContainText('42')
+  await expect(page.getByText('A persisted message', { exact: true })).toBeVisible()
   await expect(page.getByText('Check this result')).toBeVisible()
-  await page.screenshot({ path: testInfo.outputPath('notebook.png'), fullPage: true })
+  await page.getByRole('button', { name: 'Resolve', exact: true }).click()
+  await expect(page.getByText('Resolved', { exact: true })).toBeVisible()
+  await page.setViewportSize({ width: 1536, height: 1000 })
+  await page.locator('.side-panel').evaluateAll(panels => panels.forEach(panel => panel.scrollTop = 0))
+  await page.screenshot({ path: info.outputPath('desktop.png'), fullPage: true })
+  expect(doc.cells[0].id).toBeTruthy()
 })
 
-test('revision conflict preserves a draft for explicit comparison and retry', async ({ page, request }) => {
-  await page.goto('/')
-  page.once('dialog', d => d.accept('Conflict notebook'))
-  await page.getByRole('button', { name: 'New notebook' }).click()
-  await page.getByRole('button', { name: '+ Code' }).click()
-  const notebooks = await (await request.get('http://127.0.0.1:18000/api/notebooks')).json()
-  const notebook = notebooks.find((n: { title: string }) => n.title === 'Conflict notebook').notebook_id
-  const current = await (await request.get(`http://127.0.0.1:18000/api/notebooks/${notebook}`)).json()
-  const cell = current.cells[0].id
-  await page.locator('.cm-content').click()
-  await page.keyboard.type('local draft')
-  const changed = await request.patch(`http://127.0.0.1:18000/api/notebooks/${notebook}/cells/${cell}`, { data: { revision: current.metadata.europa.revision, source: 'server change' } })
-  expect(changed.status()).toBe(200)
+test('autosave serializes edits and execution shortcut uses saved code', async ({ page, request }) => {
+  const { id } = await seed(request, 'Autosave')
+  await open(page, id)
+  const editor = page.locator('.cm-content')
+  await editor.click(); await editor.press('ControlOrMeta+A'); await page.keyboard.insertText('print(84)')
+  await expect.poll(async () => (await (await request.get(`${api}/notebooks/${id}`)).json()).cells[0].source).toBe('print(84)')
+  await expect(page.getByRole('status')).toContainText('Document saved')
+  await editor.click(); await page.keyboard.press('Shift+Enter')
+  await expect(page.locator('.cell .outputs')).toContainText('84', { timeout: 45000 })
+})
+
+test('revision conflict and browser refresh preserve drafts for explicit review', async ({ page, request }, info) => {
+  const { id, doc } = await seed(request, 'Conflict notebook', 'original')
+  const cell = doc.cells[0].id
+  await open(page, id)
+  await page.getByLabel('Autosave', { exact: true }).uncheck()
+  await page.locator('.cm-content').click(); await page.keyboard.press('ControlOrMeta+A'); await page.keyboard.insertText('local draft')
+  expect((await request.patch(`${api}/notebooks/${id}/cells/${cell}`, { data: { revision: 2, source: 'server change' } })).status()).toBe(200)
   await page.getByRole('button', { name: 'Save cell' }).click()
   await expect(page.getByRole('alert')).toContainText('Revision conflict')
   await page.getByRole('button', { name: 'Compare with saved notebook' }).click()
   await expect(page.locator('.conflict')).toContainText('server change')
   await expect(page.locator('.conflict')).toContainText('local draft')
+  await page.screenshot({ path: info.outputPath('conflict.png'), fullPage: true })
+  page.once('dialog', d => d.accept())
+  await page.reload()
+  await expect(page.locator('.conflict')).toContainText('local draft')
+  await expect(page.getByRole('status')).toContainText('Autosave paused')
   await page.getByRole('button', { name: 'Keep drafts for review' }).click()
-  const saveResponse = page.waitForResponse(r => r.url().endsWith(`/cells/${cell}`) && r.request().method() === 'PATCH')
+  const saved = page.waitForResponse(r => r.url().endsWith(`/cells/${cell}`) && r.request().method() === 'PATCH')
   await page.getByRole('button', { name: 'Save cell' }).click()
-  expect((await saveResponse).status()).toBe(200)
-  const saved = await (await request.get(`http://127.0.0.1:18000/api/notebooks/${notebook}`)).json()
-  expect(saved.cells[0].source).toBe('local draft')
+  expect((await saved).status()).toBe(200)
+  expect((await (await request.get(`${api}/notebooks/${id}`)).json()).cells[0].source).toBe('local draft')
 })
 
-test('Markdown preview does not execute HTML or fetch remote images', async ({ page }) => {
-  let remoteFetch = false
-  page.on('request', r => { if (r.url().includes('example.invalid')) remoteFetch = true })
-  await page.goto('/')
-  page.once('dialog', d => d.accept('Untrusted Markdown'))
-  await page.getByRole('button', { name: 'New notebook' }).click()
-  await page.getByRole('button', { name: '+ Markdown' }).click()
-  await page.locator('.cm-content').click()
-  await page.keyboard.insertText('<script>window.pwned=1</script>\n\n![x](https://example.invalid/image.png)')
+test('interrupt settles as a saved KeyboardInterrupt error, not fabricated success', async ({ page, request }) => {
+  const { id } = await seed(request, 'Interrupt', 'import threading; threading.Event().wait(120)')
+  await open(page, id)
+  await page.getByRole('button', { name: 'Run', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Interrupt', exact: true })).toBeVisible({ timeout: 45000 })
+  await page.getByRole('button', { name: 'Interrupt', exact: true }).click()
+  await expect(page.getByText(/Execution: applied \(error\)/)).toBeVisible({ timeout: 45000 })
+  await expect(page.locator('.cell .outputs')).toContainText('KeyboardInterrupt')
+})
+
+test('rich output and Markdown cannot execute scripts or automatically fetch resources', async ({ page, request }, info) => {
+  const { id, doc } = await seed(request, 'Untrusted output', '<script>window.pwned=1</script>\n\n![x](https://example.invalid/image.png)', 'markdown')
+  const malicious = '<table><tr><td>Safe table 42</td></tr></table><script>parent.pwned=1</script><img src="https://example.invalid/a" onerror="parent.pwned=2"><svg onload="parent.pwned=3"><circle r="4"/></svg><style>@import "https://example.invalid/css";</style>'
+  const full = { ...doc, cells: [...doc.cells, { id: 'rich-output', cell_type: 'code', source: '42', metadata: {}, execution_count: 1, outputs: [{ output_type: 'display_data', data: { 'text/html': malicious, 'application/javascript': 'parent.pwned=4' }, metadata: {} }] }] }
+  expect((await request.put(`${api}/notebooks/${id}`, { data: { revision: 2, document: full } })).status()).toBe(200)
+  let external = false
+  page.on('request', r => { if (r.url().includes('example.invalid')) external = true })
+  await page.goto('/'); await page.getByLabel('Notebook', { exact: true }).selectOption(id)
   await expect(page.locator('.markdown-preview')).toContainText('[Image: x]')
-  await expect(page.locator('.markdown-preview img, .markdown-preview script')).toHaveCount(0)
+  const frame = page.frameLocator('iframe[title="Isolated notebook output"]')
+  await expect(frame.locator('td')).toHaveText('Safe table 42')
+  await expect(frame.locator('body script, body img, body style, foreignObject')).toHaveCount(0)
   expect(await page.evaluate(() => (window as unknown as { pwned?: number }).pwned)).toBeUndefined()
-  expect(remoteFetch).toBe(false)
+  expect(external).toBe(false)
+  await expect(page.getByText('Executable JavaScript/widgets are disabled.')).toBeVisible()
+  await page.screenshot({ path: info.outputPath('safe-output.png'), fullPage: true })
+})
+
+test('sidebar resizing, persisted collapse and modal mobile drawers', async ({ page }, info) => {
+  await page.goto('/')
+  const splitter = page.getByRole('separator', { name: 'Resize left sidebar' })
+  await splitter.focus(); await page.keyboard.press('ArrowRight')
+  await expect(splitter).toHaveAttribute('aria-valuenow', '290')
+  await page.getByRole('button', { name: 'Close roadmap' }).click()
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Roadmap', exact: true })).toHaveAttribute('aria-expanded', 'false')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole('button', { name: 'Discussion', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: 'Discussion', exact: true })).toBeVisible()
+  expect(await page.locator('#discussion').evaluate(e => e.matches(':modal'))).toBe(true)
+  await page.screenshot({ path: info.outputPath('mobile.png'), fullPage: true })
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: 'Discussion', exact: true })).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.getByRole('button', { name: 'Discussion', exact: true })).toBeFocused()
+})
+
+test('receipt polling reconnects after transport loss without cancelling execution', async ({ page, request }) => {
+  const { id } = await seed(request, 'Reconnect', 'sum(range(100))')
+  await open(page, id)
+  let offline = true
+  await page.route(`**/notebooks/${id}/executions?**`, route => offline ? route.abort() : route.continue())
+  await page.getByRole('button', { name: 'Run', exact: true }).click()
+  await expect(page.getByRole('status')).toContainText('reconnecting')
+  offline = false
+  await expect(page.getByText(/Execution: applied \(ok\)/)).toBeVisible({ timeout: 45000 })
+  await expect(page.locator('.cell .outputs')).toContainText('4950')
+})
+
+test('lost application response replays its exact operation without duplicating a message', async ({ page, request }) => {
+  const project = await post(request, '/projects', { title: 'Replay project' })
+  const conversation = await post(request, '/conversations', { project_id: project.id })
+  await page.goto('/'); await page.getByLabel('Project', { exact: true }).selectOption(project.id)
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible()
+  let drop = true
+  await page.route(`**/conversations/${conversation.id}/messages`, async route => {
+    if (route.request().method() === 'POST' && drop) { drop = false; await route.fetch(); await route.abort() }
+    else await route.continue()
+  })
+  await page.getByLabel('Message', { exact: true }).fill('Replay me once')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Retry pending operation' })).toBeVisible()
+  await page.reload()
+  await page.getByRole('button', { name: 'Retry pending operation' }).click()
+  await expect(page.getByRole('button', { name: 'Retry pending operation' })).toHaveCount(0)
+  const history = await (await request.get(`${api}/conversations/${conversation.id}/messages`)).json()
+  expect(history.items.filter((m: { data: { content: string } }) => m.data.content === 'Replay me once')).toHaveLength(1)
+})
+
+test('conflict output remains historical and can only be copied to unchanged code', async ({ page, request }) => {
+  const { id } = await seed(request, 'Historical conflict', 'import threading; threading.Event().wait(120)')
+  await open(page, id)
+  await page.getByRole('button', { name: 'Run', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Interrupt', exact: true })).toBeVisible({ timeout: 45000 })
+  const current = await (await request.get(`${api}/notebooks/${id}`)).json()
+  const inserted = await request.post(`${api}/notebooks/${id}/cells`, { data: { revision: current.metadata.europa.revision, cell_type: 'markdown', source: 'Intervening document edit' } })
+  expect(inserted.status()).toBe(201)
+  await page.getByRole('button', { name: 'Interrupt', exact: true }).click()
+  await page.locator('.receipt-history summary').click()
+  await page.getByRole('button', { name: 'Inspect conflict outputs' }).click()
+  await expect(page.locator('.conflict')).toContainText('KeyboardInterrupt')
+  page.once('dialog', d => d.accept())
+  await page.getByRole('button', { name: 'Copy historical output to unchanged cell' }).click()
+  await expect(page.getByRole('alert')).toContainText('Historical output copied')
+  await expect(page.locator('.cell .outputs').first()).toContainText('KeyboardInterrupt')
+  const saved = await (await request.get(`${api}/notebooks/${id}`)).json()
+  expect(saved.cells[0].metadata.europa).toBeUndefined()
+  expect(saved.cells[0].metadata.europa_recovered_output).toBeTruthy()
+  expect((await (await request.get(`${api}/notebooks/${id}/executions`)).json()).items[0].state).toBe('conflict')
+  const editor = page.locator('.cm-content').first()
+  await editor.click(); await editor.press('ControlOrMeta+A'); await page.keyboard.insertText('print("new code")')
+  await expect.poll(async () => (await (await request.get(`${api}/notebooks/${id}`)).json()).cells[0].source).toBe('print("new code")')
+  page.once('dialog', d => d.accept())
+  await page.getByRole('button', { name: 'Copy historical output to unchanged cell' }).click()
+  await expect(page.getByRole('alert')).toContainText('Source has changed')
+})
+
+test('comment anchors navigate and retain outdated and orphaned history', async ({ page, request }) => {
+  const { id, doc } = await seed(request, 'Anchor history')
+  const cell = doc.cells[0].id
+  const project = await post(request, '/projects', { title: 'Anchor project' })
+  await post(request, `/projects/${project.id}/notebooks`, { revision: 1, notebook_id: id })
+  await post(request, `/notebooks/${id}/comments`, { project_id: project.id, notebook_id: id, cell_id: cell, content: 'Persistent anchor' })
+  await open(page, id); await page.getByLabel('Project', { exact: true }).selectOption(project.id)
+  await page.getByRole('button', { name: `Cell ${cell} · current` }).click()
+  await expect(page.locator('.cell')).toHaveClass(/selected/)
+  await page.locator('.cm-content').click(); await page.keyboard.press('ControlOrMeta+A'); await page.keyboard.insertText('print(43)')
+  await expect(page.locator('.badge.outdated')).toHaveText('outdated', { timeout: 10000 })
+  page.once('dialog', d => d.accept())
+  await page.getByRole('button', { name: 'Delete', exact: true }).click()
+  await expect(page.locator('.badge.orphaned')).toHaveText('orphaned')
+  await expect(page.getByRole('button', { name: `Cell ${cell} · orphaned` })).toBeDisabled()
+  await expect(page.getByText('Persistent anchor', { exact: true })).toBeVisible()
 })

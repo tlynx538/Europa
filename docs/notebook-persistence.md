@@ -80,6 +80,8 @@ identifiers. JSON request bodies reject unknown fields.
 | `POST /notebooks/{id}/cells/{cell}/execute` | `{ "revision": N, "kernel_id": "...", "timeout": 30 }`; 202 receipt; kernel ID optional |
 | `GET /notebooks/{id}/executions/{execution}` | Durable receipt, result and application/conflict/uncertain state |
 | `GET /notebooks/{id}/executions?offset=0&limit=50` | Paginated recovery identities and states, excluding runtime/protocol metadata and outputs |
+| `POST /notebooks/{id}/executions/{execution}/interrupt` | Interrupt an existing verified running receipt/kernel binding; 204 is a request acknowledgment, not execution completion |
+| `GET /notebooks/{id}/session` | Observed ready/disconnected/unavailable state and owned-kernel count, without provisioning or operational bindings |
 
 Insert defaults to a code cell appended at the end; source/metadata/index are
 optional. Editing source requires an explicit source value. Changing cell type
@@ -88,6 +90,14 @@ outputs/count empty. Moves preserve IDs. Source/type/output edits invalidate the
 cell's previous execution marker. Whole-document saves also invalidate markers
 on changed cells. Notebook identity/title/revision are managed by the server;
 renaming uses PATCH, not a forged metadata replacement.
+
+Phase 3E projects public receipt lookup to notebook/cell/execution identity, creation
+time, state, source fingerprint and standard result status/outputs/count. Private
+runtime/generation/kernel bindings and display/protocol session mappings remain in
+the durable receipt store but are not returned to browsers. Source fingerprints
+allow explicit unchanged-source historical output recovery through the existing
+revision-checked whole-document save. This does not modify the original receipt's
+conflict state or create valid execution evidence for task acceptance.
 
 A missing notebook/cell/execution returns 404; stale revisions/busy document execution
 return 409; invalid format/input returns 422; oversized persisted data returns 413;

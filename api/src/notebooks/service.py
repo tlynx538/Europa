@@ -11,6 +11,7 @@ class NotebookService:
     def __init__(self, store, supervisor):
         self.store, self.supervisor = store, supervisor
         self.tasks = {}
+        self.interrupts = {}
         self.closed = False
 
     @staticmethod
@@ -19,6 +20,7 @@ class NotebookService:
 
     async def submit(self, notebook, cell, revision, *, kernel_id=None, timeout=30):
         if self.closed: raise NotebookError('Notebook execution service is closing', 503)
+        if notebook in self.interrupts: raise NotebookError('Notebook interrupt is still being acknowledged', 409)
         if notebook in self.tasks: raise NotebookError('Notebook already has an active document execution', 409)
         ready = asyncio.get_running_loop().create_future()
         ready.add_done_callback(self._retrieve)
@@ -30,6 +32,47 @@ class NotebookService:
     def _done(self, notebook, task):
         self.tasks.pop(notebook, None)
         self._retrieve(task)
+
+    async def interrupt(self, notebook, execution):
+        if self.closed: raise NotebookError('Notebook execution service is closing', 503)
+        if notebook in self.interrupts: raise NotebookError('Notebook already has a pending interrupt', 409)
+        task = asyncio.create_task(self._interrupt(notebook, execution))
+        self.interrupts[notebook] = task
+        def done(completed):
+            self.interrupts.pop(notebook, None)
+            self._retrieve(completed)
+        task.add_done_callback(done)
+        # A disconnected waiter must not release admission while its interrupt
+        # could still arrive at the kernel and hit a newer document execution.
+        return await asyncio.shield(task)
+
+    async def _interrupt(self, notebook, execution):
+        """Interrupt an existing verified binding; never provision a replacement."""
+        receipt = await asyncio.to_thread(self.store.execution, notebook, execution)
+        supervisor = self.supervisor
+        identity = supervisor.notebooks.get(notebook)
+        handle = supervisor.handles.get(identity)
+        if (receipt['state'] != 'running' or not handle or
+                receipt.get('runtime_id') != identity or
+                receipt.get('generation') != handle.generation or not receipt.get('kernel_id')):
+            raise NotebookError('Execution no longer has a verified running kernel', 409)
+        async with supervisor._lock(notebook):
+            if supervisor.notebooks.get(notebook) != identity:
+                raise NotebookError('Runtime binding changed; interrupt was not sent', 409)
+            status = await supervisor.inspect(identity)
+            if not status.ready or status.handle.generation != receipt.get('generation'):
+                raise NotebookError('Runtime is unavailable; execution outcome may be uncertain', 409)
+            client = supervisor._clients[identity]
+            await client.inspect_kernel(receipt['kernel_id'])
+            current = await asyncio.to_thread(self.store.execution, notebook, execution)
+            if current['state'] != 'running':
+                raise NotebookError('Execution already settled; interrupt was not sent', 409)
+        lifecycle = getattr(supervisor, 'lifecycle', None)
+        if lifecycle:
+            # Preserve durable operation fencing and disconnection-independent
+            # ownership. The wrapper reacquires the notebook lock itself.
+            client = lifecycle.gateway(notebook, identity, client)
+        await client.interrupt_kernel(receipt['kernel_id'])
 
     async def _run(self, ready, notebook, cell, revision, kernel_id, timeout):
         receipt = None
@@ -77,7 +120,8 @@ class NotebookService:
 
     async def close(self, grace=30):
         self.closed = True
-        if self.tasks:
-            _, pending = await asyncio.wait(tuple(self.tasks.values()), timeout=grace)
+        tasks = tuple(self.tasks.values()) + tuple(self.interrupts.values())
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=grace)
             for task in pending: task.cancel()
             if pending: await asyncio.gather(*pending, return_exceptions=True)

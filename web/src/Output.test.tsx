@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { Outputs } from './Output'
@@ -12,5 +13,7 @@ describe('untrusted notebook output', () => {
     expect(html).not.toContain('<script>')
     expect(html).not.toContain('<img')
     expect(html).not.toContain('https://example.com')
+    expect(html).toContain('sandbox=""')
+    expect(html).toContain('script-src')
   })
 })

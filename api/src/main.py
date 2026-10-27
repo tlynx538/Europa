@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from internal.middleware import debug_middleware
 from internal.router import router
@@ -113,6 +115,29 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
 
     app = FastAPI(lifespan=lifespan)
 
+    @app.middleware('http')
+    async def browser_boundary(request, call_next):
+        # JSON is not a cross-origin ingress API. Keep existing non-browser API
+        # clients working, but reject cross-site browser mutations / DNS rebinding.
+        host = request.url.hostname
+        origin = request.headers.get('origin')
+        if host not in {'127.0.0.1', 'localhost', '::1', 'testserver', 'europa'}:
+            return JSONResponse(status_code=403, content={'detail': 'Loopback host required'})
+        if request.method not in {'GET', 'HEAD', 'OPTIONS'} and (
+                request.headers.get('sec-fetch-site') == 'cross-site' or
+                (origin and origin != str(request.base_url).rstrip('/'))):
+            return JSONResponse(status_code=403, content={'detail': 'Same-origin request required'})
+        response = await call_next(request)
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['Referrer-Policy'] = 'no-referrer'
+        response.headers['Content-Security-Policy'] = (
+            "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; "
+            "font-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'")
+        if request.url.path.startswith('/api/'):
+            response.headers['Cache-Control'] = 'no-store'
+        return response
+
     @app.exception_handler(NotebookError)
     async def notebook_error(_: Request, exc: NotebookError):
         return JSONResponse(status_code=exc.status_code, content={'detail': str(exc)})
@@ -127,12 +152,18 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
 
     @app.get("/")
     async def home():
+        index = Path(__file__).resolve().parents[2] / 'web' / 'dist' / 'index.html'
+        if index.is_file():
+            return FileResponse(index, headers={'Cache-Control': 'no-cache'})
         return {"message": "Europa API", "backend": "jupyter-kernel-gateway"}
 
     app.middleware("http")(debug_middleware)
     app.include_router(router, prefix="/api", tags=["kernel"])
     app.include_router(notebook_router, prefix="/api", tags=["notebooks"])
     app.include_router(application_router, prefix="/api", tags=["application"])
+    assets = Path(__file__).resolve().parents[2] / 'web' / 'dist' / 'assets'
+    if assets.is_dir():
+        app.mount('/assets', StaticFiles(directory=assets), name='web-assets')
     return app
 
 

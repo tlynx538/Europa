@@ -131,7 +131,32 @@ async def execute(notebook: str, cell: str, request: Request, body: Execute):
 
 @router.get('/{notebook}/executions/{execution}')
 async def get_execution(notebook: str, execution: str, request: Request):
-    return await asyncio.to_thread(store(request).execution, notebook, execution)
+    receipt = await asyncio.to_thread(store(request).execution, notebook, execution)
+    # Runtime bindings, display mappings and protocol sessions are private.
+    result = {key: receipt[key] for key in ('notebook_id', 'cell_id', 'execution_id', 'state', 'created_at')}
+    result['source_hash'] = receipt['source_hash']
+    if 'result' in receipt:
+        result['result'] = {key: receipt['result'][key] for key in ('status', 'outputs', 'execution_count')}
+    return result
+
+
+@router.post('/{notebook}/executions/{execution}/interrupt', status_code=204)
+async def interrupt_execution(notebook: str, execution: str, request: Request):
+    await request.app.state.notebook_service.interrupt(notebook, execution)
+    return Response(status_code=204)
+
+
+@router.get('/{notebook}/session')
+async def session(notebook: str, request: Request):
+    await asyncio.to_thread(store(request).open, notebook)
+    supervisor = request.app.state.supervisor
+    identity = supervisor.notebooks.get(notebook)
+    if identity is None:
+        return {'state': 'disconnected', 'ready': False, 'kernels': 0}
+    status = await supervisor.inspect(identity)
+    client = supervisor._clients.get(identity)
+    return {'state': 'connected' if status.ready else 'unavailable', 'ready': status.ready,
+            'kernels': len(client._owned) if client and status.ready else 0}
 
 
 @router.get('/{notebook}/executions')

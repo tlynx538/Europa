@@ -23,36 +23,51 @@ Clean containerd+runc prewarming and durable idle cleanup are configurable.
 Standard notebook persistence and cell execution are available.
 Projects, conversations, versioned roadmaps, cell comments and activity histories
 are persisted through the [Phase 3B application APIs](docs/conversational-notebooks.md).
-MCP is not implemented. An incomplete notebook UI preview is available in `web/`.
+MCP and agents are not implemented. The owner-facing notebook UI is in `web/`.
 
-### Notebook UI preview
+### Owner notebook UI (Phase 3E)
 
-Run the loopback API as described below, then in another terminal run:
+Build the UI once, then run the loopback API as described below. FastAPI serves
+the built UI at `http://127.0.0.1:8000/` with restrictive browser security headers:
 
 ```sh
 cd web
 npm ci
-npm run dev
+npm run build
+cd ..
 ```
 
-Open the loopback URL printed by Vite. The development server proxies `/api` to
-`127.0.0.1:8000`; do not expose either server to a network. The preview supports
-notebook and project creation, cell editing with explicit saves, ordering and
-execution, basic roadmaps, messages, and cell comments. Reload the saved notebook to
-see applied results. Markdown preview ignores raw HTML, remote images and links;
-output displays escaped text and JSON only. Other MIME types remain saved but are
-not displayed. This is not the completed Phase 3D interface: autosave, interrupts,
-rich output, responsive drawers, full roadmap editing and comprehensive recovery
-and test coverage are still outstanding. Python variables are live kernel state and
-are not part of the saved document.
-Drafts are held only in the current page, not durable browser storage. For application
-mutations, a lost response can be ambiguous; inspect persisted state before repeating
-an action. Receipt history is polled for reconnection, but conflict outputs do not yet
-have a recovery UI. The receipt listing currently scans retained receipt files before
-pagination and is not optimized for large histories.
+For frontend development, `npm run dev` starts a loopback Vite server proxying `/api`
+to `127.0.0.1:8000`. Do not expose either server to a network. Browser mutations must
+be same-origin. Production uses one FastAPI process, not the Vite development server.
+
+The UI supports projects, notebook membership, versioned task editing and owner
+acceptance, threaded discussions, cell comments and contextual activity. Sidebars
+resize/collapse on desktop and become modal drawers on mobile. CodeMirror supports
+Python highlighting, Shift+Enter to save/run, and Cmd/Ctrl+S to save. Autosave uses
+serialized revision-checked writes; conflicts pause autosave for explicit comparison.
+Browser-local drafts and exact pending application operation IDs survive refresh.
+Keep the same browser origin/port for that recovery storage; clearing site data
+removes drafts, not saved server documents. Browser storage is not encrypted and
+is not a backup. Saved outputs do **not** checkpoint Python variables.
+
+Receipt history reconnects independently of cell markers. Saved results refresh
+automatically without dropping local drafts. Interrupt targets an existing verified
+receipt/kernel binding without provisioning a new runtime. A disconnection never
+means cancellation. Conflicted outputs can be inspected, dismissed, or explicitly
+copied into an unchanged-source cell with a revision-checked document save. Such
+copies carry provenance and do not turn conflict receipts into successful evidence.
+
+Markdown disables raw HTML, remote images and links. HTML/tables and static SVG
+outputs are strictly sanitized and rendered in scriptless, opaque-origin sandboxed
+iframes with a no-network CSP. Embedded PNG/JPEG images are signature/dimension/size
+limited. Plotly data has a limited static scatter/bar preview, **not** an interactive
+Plotly engine. JavaScript, widgets and unsupported MIME remain inert and preserved.
+No uploads, agents, LLM providers, MCP, or multi-user authentication are added. Details,
+validation and remaining limitations are in [Phase 3E UI](docs/phase3e-ui.md).
 
 Frontend checks are `npm test` and `npm run build` in `web/`. The browser test
-`npm run test:browser` starts disposable loopback API and Vite servers and executes
+`npm run test:browser` builds the UI, starts a disposable loopback API and executes
 trusted Python using the local Gateway provider. It requires the repository `.venv`
 and Chrome; set `EUROPA_CHROME` to the Chrome executable if it is not installed at
 the macOS default path. Set `EUROPA_TEST_TMP` to an appropriate private temporary

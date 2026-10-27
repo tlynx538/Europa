@@ -1,125 +1,83 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import CodeMirror from '@uiw/react-codemirror'
+import { keymap } from '@codemirror/view'
+import { Prec } from '@codemirror/state'
 import Markdown from 'react-markdown'
 import { python } from '@codemirror/lang-python'
-import { ApiError, json, request, type Receipt } from './api'
-import { Outputs, type Output } from './Output'
+import { request, type Receipt } from './api'
+import { Outputs } from './Output'
 import { Workspace } from './Workspace'
+import { CommentIndicator, Layout } from './Layout'
+import { source, useNotebook, type Meta } from './useNotebook'
 import './style.css'
 
-type Meta = { notebook_id: string; title: string; revision: number }
-type Cell = { id: string; cell_type: 'code' | 'markdown'; source: string | string[]; metadata: { europa?: { execution_id: string; status: string } }; outputs?: Output[] }
-type Notebook = { metadata: { europa: Meta }; cells: Cell[] }
-const source = (cell: Cell) => Array.isArray(cell.source) ? cell.source.join('') : cell.source
-
 function App() {
-  const [list, setList] = useState<Meta[]>([])
-  const [doc, setDoc] = useState<Notebook | null>(null)
-  const [drafts, setDrafts] = useState<Record<string, string>>({})
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  const [remote, setRemote] = useState<Notebook | null>(null)
-  const [receipts, setReceipts] = useState<Record<string, Receipt>>({})
-  const [commentCounts, setCommentCounts] = useState<Record<string, number>>({})
-  const [targetCell, setTargetCell] = useState<string | null>(null)
-  const updateCommentCounts = useCallback((counts: Record<string, number>) => setCommentCounts(counts), [])
+  const nb = useNotebook()
+  const { doc, drafts, busy, error, remote, dirty, receipts } = nb
   const id = doc?.metadata.europa.notebook_id
+  const [list, setList] = useState<Meta[]>([])
+  const [counts, setCounts] = useState<Record<string, number>>({})
+  const [selectedCell, setSelectedCell] = useState<string | undefined>()
+  const [activity, setActivity] = useState(false)
+  const [conflictResult, setConflictResult] = useState<Receipt | null>(null)
+  const [preview, setPreview] = useState<Record<string, boolean>>({})
+  const updateCounts = useCallback((value: Record<string, number>) => setCounts(value), [])
+  useEffect(() => { setConflictResult(null); setSelectedCell(previous => doc?.cells.some(c => c.id === previous) ? previous : undefined) }, [id])
+  useEffect(() => { void request<Meta[]>('/notebooks').then(setList).catch(e => nb.setError(String(e))) }, [id, doc?.metadata.europa.title])
   useEffect(() => {
-    if (!targetCell || !doc) return
-    const target = document.getElementById(`cell-${targetCell}`)
-    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    setTargetCell(null)
-  }, [doc, targetCell])
-  const refreshList = () => request<Meta[]>('/notebooks').then(setList).catch(e => setError(String(e)))
-  useEffect(() => { void refreshList() }, [])
-  async function open(notebook: string) {
-    const result = await request<Notebook>(`/notebooks/${notebook}`)
-    setDoc(result); setDrafts({}); setReceipts({}); setRemote(null); setError('')
-  }
-  const dirty = !!doc && doc.cells.some(c => drafts[c.id] !== undefined && drafts[c.id] !== source(c))
-  useEffect(() => {
-    if (!dirty) return
-    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
-    window.addEventListener('beforeunload', warn)
-    return () => window.removeEventListener('beforeunload', warn)
-  }, [dirty])
-  async function action(fn: () => Promise<void>) {
-    setBusy(true); setError('')
-    try { await fn() } catch (e) {
-      setError(e instanceof ApiError && e.status === 409 ? 'Revision conflict or notebook busy. Your drafts are retained. Compare with the saved notebook before retrying.' : String(e))
-    } finally { setBusy(false) }
-  }
-  async function mutate(path: string, body: object, method = 'POST') {
-    if (!doc || dirty) throw new Error('Save or discard drafts before changing the notebook.')
-    const next = await request<Notebook>(`/notebooks/${id}${path}`, json(method, { revision: doc.metadata.europa.revision, ...body }))
-    setDoc(next)
-  }
-  useEffect(() => {
-    if (!id) return
-    let stopped = false
-    let timer: ReturnType<typeof setTimeout>
-    async function recover() {
-      try {
-        const latest: Record<string, Receipt> = {}
-        let offset: number | null = 0
-        do {
-          const page: { items: Receipt[]; next_offset: number | null } = await request(`/notebooks/${id}/executions?offset=${offset}&limit=100`)
-          for (const receipt of page.items) latest[receipt.cell_id] = receipt
-          offset = page.next_offset
-        } while (offset !== null && !stopped)
-        if (!stopped) setReceipts(latest)
-      } catch {
-        if (!stopped) setError('Receipt connection lost. Execution may still be running; reconnecting automatically.')
-      } finally { if (!stopped) timer = setTimeout(recover, 3000) }
-    }
-    void recover()
-    return () => { stopped = true; clearTimeout(timer) }
-  }, [id])
-  return <div className="shell">
-    <aside className="notebook-list"><h1>Europa</h1><h2>Notebooks</h2><button disabled={busy || dirty} onClick={() => void action(async () => {
-      const title = prompt('Notebook title'); if (!title) return
-      const next = await request<Notebook>('/notebooks', json('POST', { title })); setDoc(next); setDrafts({}); await refreshList()
-    })}>New notebook</button>{list.map(n => <button className="list" key={n.notebook_id} disabled={busy || dirty} onClick={() => void action(() => open(n.notebook_id))}>{n.title}</button>)}<footer>Document storage is separate from live kernel state.</footer></aside>
-    <main><header><h2>{doc?.metadata.europa.title ?? 'Open a notebook'}</h2>{doc && <button disabled={busy} onClick={() => { if (!dirty || confirm('Discard unsaved drafts and reload?')) void action(() => open(id!)) }}>Reload saved notebook</button>}</header>
-      {error && <div role="alert" className="alert">{error}</div>}
-      {doc && dirty && <button disabled={busy} onClick={() => void action(async () => setRemote(await request<Notebook>(`/notebooks/${id}`)))}>Compare with saved notebook</button>}
-      {remote && doc && <section className="conflict"><h3>Compare before resolving</h3><p>Saved revision {remote.metadata.europa.revision}. Reapplying a draft overwrites that cell’s saved source only after you explicitly save it.</p>
-        {doc.cells.filter(c => drafts[c.id] !== undefined && drafts[c.id] !== source(c)).map(c => <div key={c.id}><h4>Cell {c.id}</h4><strong>Saved source</strong><pre>{remote.cells.find(r => r.id === c.id) ? source(remote.cells.find(r => r.id === c.id)!) : '(cell deleted on server)'}</pre><strong>Your draft</strong><pre>{drafts[c.id]}</pre></div>)}
-        <button disabled={busy || doc.cells.some(c => drafts[c.id] !== undefined && drafts[c.id] !== source(c) && !remote.cells.some(r => r.id === c.id))} onClick={() => { setDoc(remote); setRemote(null); setError('Drafts retained against the newer revision. Review and save each cell explicitly.') }}>Keep drafts for review</button>{' '}
-        <button disabled={busy} onClick={() => { setDoc(remote); setDrafts({}); setRemote(null); setError('') }}>Discard drafts and use saved version</button>
-        <p>Drafts for cells deleted on the server cannot be reapplied here; copy them before discarding.</p>
-      </section>}
-      {doc && <><p>Revision {doc.metadata.europa.revision} · {dirty ? 'Unsaved edits' : 'Saved document'}</p>
-      {doc.cells.map((cell, index) => <section className="cell" id={`cell-${cell.id}`} key={cell.id}>
-        <div className="toolbar"><strong>{cell.cell_type}</strong>{commentCounts[cell.id] ? <a href="#discussion">{commentCounts[cell.id]} comments</a> : null}<span>{receipts[cell.id] ? `Execution: ${receipts[cell.id].state}${receipts[cell.id].result ? ` (${receipts[cell.id].result!.status})` : ''}` : cell.metadata.europa?.status ?? ''}</span>
-          <button disabled={busy || drafts[cell.id] === undefined || drafts[cell.id] === source(cell)} onClick={() => void action(async () => {
-            const next = await request<Notebook>(`/notebooks/${id}/cells/${cell.id}`, json('PATCH', { revision: doc.metadata.europa.revision, source: drafts[cell.id] }))
-            setDoc(next); setDrafts(prev => { const copy = { ...prev }; delete copy[cell.id]; return copy })
-          })}>Save cell</button>
-          {cell.cell_type === 'code' && <button disabled={busy || dirty} onClick={() => void action(async () => {
-            let receipt: Receipt
-            try { receipt = await request<Receipt>(`/notebooks/${id}/cells/${cell.id}/execute`, json('POST', { revision: doc.metadata.europa.revision })) }
-            catch (e) {
-              if (e instanceof ApiError) throw e
-              throw new Error('Execution submission response was lost. It may have been accepted; do not retry until receipt history and the saved notebook have been checked.')
-            }
-            setReceipts(prev => ({ ...prev, [cell.id]: receipt }))
-            try { await open(id!) } catch {
-              throw new Error(`Execution ${receipt.execution_id} was accepted, but reconnect failed. It may still be running; reopen the notebook to reconnect.`)
-            }
-          })}>Run</button>}
-          <button disabled={busy || dirty || index === 0} onClick={() => void action(() => mutate(`/cells/${cell.id}/move`, { index: index - 1 }))}>↑</button>
-          <button disabled={busy || dirty || index === doc.cells.length - 1} onClick={() => void action(() => mutate(`/cells/${cell.id}/move`, { index: index + 1 }))}>↓</button>
-          <button disabled={busy || dirty} onClick={() => { if (confirm('Delete this cell?')) void action(async () => setDoc(await request<Notebook>(`/notebooks/${id}/cells/${cell.id}?revision=${doc.metadata.europa.revision}`, { method: 'DELETE' }))) }}>Delete</button></div>
-        <CodeMirror value={drafts[cell.id] ?? source(cell)} extensions={cell.cell_type === 'code' ? [python()] : []} editable={!busy} onChange={value => setDrafts(prev => ({ ...prev, [cell.id]: value }))} />
-        {cell.cell_type === 'markdown' && <div className="markdown-preview"><Markdown skipHtml components={{ a: ({ children }) => <span>{children}</span>, img: ({ alt }) => <span>[Image: {alt ?? ''}]</span> }}>{drafts[cell.id] ?? source(cell)}</Markdown></div>}
-        <Outputs outputs={cell.outputs ?? []} />
-      </section>)}<div><button disabled={busy || dirty} onClick={() => void action(() => mutate('/cells', { cell_type: 'code' }))}>+ Code</button> <button disabled={busy || dirty} onClick={() => void action(() => mutate('/cells', { cell_type: 'markdown' }))}>+ Markdown</button></div></>}
-    </main><Workspace notebookId={id} cells={doc?.cells ?? []} onCommentCounts={updateCommentCounts} onOpenNotebook={(notebook, cell) => {
-      if (!busy && (!dirty || confirm('Discard unsaved drafts and open another notebook?'))) void action(async () => { await open(notebook); if (cell) setTargetCell(cell) })
-    }} />
-  </div>
+    if (selectedCell) document.getElementById(`cell-${selectedCell}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, [selectedCell, id])
+  const latest = Object.fromEntries(receipts.map(r => [r.cell_id, r]))
+  return <Layout><main>
+    <header><h1>{doc?.metadata.europa.title ?? 'Notebook'}</h1><select aria-label="Notebook" value={id ?? ''} disabled={busy} onChange={e => { if (e.target.value) void nb.open(e.target.value) }}><option value="">Open notebook</option>{list.map(n => <option key={n.notebook_id} value={n.notebook_id}>{n.title}</option>)}</select>
+      <button disabled={busy || dirty} onClick={() => { const title = prompt('Notebook title')?.trim(); if (title) void nb.create(title) }}>New notebook</button>
+    </header>
+    {doc && <div className="toolbar">
+      <button disabled={busy || dirty} onClick={() => { const title = prompt('Notebook title', doc.metadata.europa.title)?.trim(); if (title) void nb.mutate('', { title }, 'PATCH') }}>Rename</button>
+      <button disabled={busy} onClick={() => { if (!dirty || confirm('Discard browser drafts and reload saved notebook?')) void nb.open(id!, true) }}>Reload saved notebook</button>
+      <label><input type="checkbox" checked={nb.autosave} onChange={e => nb.setAutosave(e.target.checked)} />Autosave</label>
+      <button disabled={busy || !dirty || !!remote} onClick={() => void nb.save()}>Save all</button>
+      <button aria-pressed={activity} onClick={() => setActivity(!activity)}>{activity ? 'Notebook only' : 'Contextual activity'}</button>
+      <span>Revision {doc.metadata.europa.revision}</span>
+    </div>}
+    {error && <p role="alert" className="alert">{error}</p>}
+    {nb.paused && !remote && <button disabled={busy} onClick={nb.resume}>Resume autosave after review</button>}
+    {doc && dirty && <button disabled={busy} onClick={() => void nb.compare()}>Compare with saved notebook</button>}
+    {remote && <section className="conflict"><h2>Compare before resolving</h2><p>Server revision {remote.metadata.europa.revision}. Reapplying drafts requires explicit review and a new revision-checked save.</p>
+      {Object.entries(drafts).map(([cell, value]) => <div key={cell}><h3>Cell {cell}</h3><strong>Saved source</strong><pre>{remote.cells.some(c => c.id === cell) ? source(remote.cells.find(c => c.id === cell)!) : '(deleted on server)'}</pre><strong>Your draft</strong><pre>{value}</pre></div>)}
+      <button disabled={Object.keys(drafts).some(cell => !remote.cells.some(c => c.id === cell))} onClick={() => nb.resolve(true)}>Keep drafts for review</button>{' '}
+      <button onClick={() => nb.resolve(false)}>Discard drafts and use saved version</button><p>Copy drafts of deleted cells before discarding them.</p>
+    </section>}
+    {doc?.cells.map((cell, index) => <section className={`cell ${selectedCell === cell.id ? 'selected' : ''}`} id={`cell-${cell.id}`} key={cell.id} onFocus={() => setSelectedCell(cell.id)}>
+      <div className="toolbar"><strong>{cell.cell_type} {cell.cell_type === 'code' ? `[${cell.execution_count ?? ' '}]` : ''}</strong><small>Cell {cell.id}</small>
+        {counts[cell.id] ? <CommentIndicator cell={cell.id} count={counts[cell.id]} /> : null}
+        <span>{latest[cell.id] ? `${latest[cell.id].state === 'applied' && cell.metadata.europa?.execution_id !== latest[cell.id].execution_id ? 'Previous execution' : 'Execution'}: ${latest[cell.id].state}${latest[cell.id].result ? ` (${latest[cell.id].result!.status})` : ''}${drafts[cell.id] !== undefined ? ' · draft not executed' : ''}` : cell.metadata.europa?.status ?? ''}</span>
+        <button disabled={busy || drafts[cell.id] === undefined || !!remote} onClick={() => void nb.save()}>Save cell</button>
+        {cell.cell_type === 'code' && <button disabled={busy || nb.active || nb.paused} onClick={() => void nb.execute(cell.id)}>Run</button>}
+        {latest[cell.id]?.state === 'running' && <button disabled={busy} onClick={() => void nb.action(async () => { await request(`/notebooks/${id}/executions/${latest[cell.id].execution_id}/interrupt`, { method: 'POST' }); nb.setError('Interrupt requested; waiting for the authoritative receipt result.') })}>Interrupt</button>}
+        {cell.cell_type === 'markdown' && <button onClick={() => setPreview(p => ({ ...p, [cell.id]: p[cell.id] === false }))}>{preview[cell.id] === false ? 'Preview' : 'Hide preview'}</button>}
+        <button aria-label={`Move cell ${index + 1} up`} disabled={busy || nb.active || index === 0} onClick={() => void nb.mutate(`/cells/${cell.id}/move`, { index: index - 1 })}>↑</button>
+        <button aria-label={`Move cell ${index + 1} down`} disabled={busy || nb.active || index === doc.cells.length - 1} onClick={() => void nb.mutate(`/cells/${cell.id}/move`, { index: index + 1 })}>↓</button>
+        <button disabled={busy || nb.active} onClick={() => { if (confirm('Delete this cell?')) void nb.remove(cell.id) }}>Delete</button>
+      </div>
+      <CodeMirror value={drafts[cell.id] ?? source(cell)} extensions={[
+        ...(cell.cell_type === 'code' ? [python()] : []),
+        Prec.highest(keymap.of([{ key: 'Shift-Enter', run: () => { if (cell.cell_type === 'code' && !nb.active && !busy) void nb.execute(cell.id); return true } },
+          { key: 'Mod-s', run: () => { void nb.save(); return true } }, { key: 'Escape', run: view => { view.contentDOM.blur(); return true } }])),
+      ]} editable={!busy} onChange={value => nb.edit(cell.id, value)} />
+      {cell.cell_type === 'markdown' && preview[cell.id] !== false && <div className="markdown-preview"><Markdown skipHtml components={{ a: ({ children }) => <span>{children}</span>, img: ({ alt }) => <span>[Image: {alt ?? ''}]</span> }}>{drafts[cell.id] ?? source(cell)}</Markdown></div>}
+      <Outputs outputs={cell.outputs ?? []} />
+      {!cell.metadata.europa && typeof cell.metadata.europa_recovered_output === 'string' && <p className="muted">Historical output copied from conflict receipt {cell.metadata.europa_recovered_output}. Not a fresh execution result.</p>}
+    </section>)}
+    {doc && <div className="toolbar"><button disabled={busy || nb.active} onClick={() => void nb.mutate('/cells', { cell_type: 'code' })}>+ Code</button><button disabled={busy || nb.active} onClick={() => void nb.mutate('/cells', { cell_type: 'markdown' })}>+ Markdown</button></div>}
+    {receipts.length > 0 && <details className="receipt-history"><summary>Execution history ({receipts.length})</summary>{receipts.map(r => <div key={r.execution_id}><code>{r.execution_id.slice(0, 10)}</code> · {r.state} {r.result?.status}
+      {r.state === 'conflict' && <button onClick={() => void nb.action(async () => setConflictResult(await request<Receipt>(`/notebooks/${id}/executions/${r.execution_id}`)))}>Inspect conflict outputs</button>}</div>)}</details>}
+    {conflictResult && <section className="conflict"><h2>Conflict output — not applied</h2><p>Receipt {conflictResult.execution_id}. Newer edits are unchanged. You may explicitly copy historical output only if the source still matches. The receipt will remain conflict, never execution evidence of success. Re-run reviewed code for a fresh result.</p><Outputs outputs={conflictResult.result?.outputs ?? []} />
+      <button disabled={busy || dirty || nb.active} onClick={() => { if (confirm('Replace this cell’s saved outputs with historical conflict output? Source must match and the current revision must still be valid.')) void nb.importConflict(conflictResult) }}>Copy historical output to unchanged cell</button>{' '}
+      <button onClick={() => setConflictResult(null)}>Dismiss preview (receipt retained)</button></section>}
+    <footer className="status" role="status"><span>API: {nb.connection}</span><span>Kernel: {nb.session.state} ({nb.session.kernels})</span><span>{busy ? 'Saving / requesting…' : nb.paused ? 'Autosave paused' : dirty ? 'Unsaved draft (browser recovery)' : doc ? 'Document saved' : 'No notebook selected'}</span><span>{nb.active ? 'Runtime executing' : 'No pending receipt'}</span><span>Agents: not implemented</span><small>Saved outputs do not checkpoint Python variables.</small></footer>
+  </main><Workspace notebookId={id} revision={doc?.metadata.europa.revision} cells={doc?.cells ?? []} selectedCell={selectedCell} showActivity={activity} onCommentCounts={updateCounts} onOpenNotebook={(notebook, cell) => { if (notebook === id) { if (cell) { setSelectedCell(cell); document.getElementById(`cell-${cell}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) } } else void nb.open(notebook).then(() => { if (cell) setSelectedCell(cell) }) }} /></Layout>
 }
 
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>)
