@@ -23,8 +23,7 @@ Clean containerd+runc prewarming and durable idle cleanup are configurable.
 Standard notebook persistence and cell execution are available.
 Projects, conversations, versioned roadmaps, cell comments and activity histories
 are persisted through the [Phase 3B application APIs](docs/conversational-notebooks.md).
-MCP is not implemented. An incomplete notebook UI preview is available in `web/`;
-it does not yet implement the full project, roadmap, or discussion workflow.
+MCP is not implemented. An incomplete notebook UI preview is available in `web/`.
 
 ### Notebook UI preview
 
@@ -37,14 +36,27 @@ npm run dev
 ```
 
 Open the loopback URL printed by Vite. The development server proxies `/api` to
-`127.0.0.1:8000`; do not expose either server to a network. This preview supports
-notebook creation, cell editing with explicit saves, ordering and execution. Reload
-the saved notebook to see applied results. It deliberately renders only escaped text
-and JSON; other MIME types remain saved but are not displayed. It is not the completed
-Phase 3C interface: project creation, roadmaps, comments, discussions, autosave,
-interrupts, rich output, responsive drawers, full reconnect/conflict recovery and
-browser/integration test coverage are still outstanding. Python variables are live
-kernel state and are not part of the saved document.
+`127.0.0.1:8000`; do not expose either server to a network. The preview supports
+notebook and project creation, cell editing with explicit saves, ordering and
+execution, basic roadmaps, messages, and cell comments. Reload the saved notebook to
+see applied results. Markdown preview ignores raw HTML, remote images and links;
+output displays escaped text and JSON only. Other MIME types remain saved but are
+not displayed. This is not the completed Phase 3D interface: autosave, interrupts,
+rich output, responsive drawers, full roadmap editing and comprehensive recovery
+and test coverage are still outstanding. Python variables are live kernel state and
+are not part of the saved document.
+Drafts are held only in the current page, not durable browser storage. For application
+mutations, a lost response can be ambiguous; inspect persisted state before repeating
+an action. Receipt history is polled for reconnection, but conflict outputs do not yet
+have a recovery UI. The receipt listing currently scans retained receipt files before
+pagination and is not optimized for large histories.
+
+Frontend checks are `npm test` and `npm run build` in `web/`. The browser test
+`npm run test:browser` starts disposable loopback API and Vite servers and executes
+trusted Python using the local Gateway provider. It requires the repository `.venv`
+and Chrome; set `EUROPA_CHROME` to the Chrome executable if it is not installed at
+the macOS default path. Set `EUROPA_TEST_TMP` to an appropriate private temporary
+directory. Test notebook data is retained in a newly created temporary directory.
 
 ## Reproducible environment
 

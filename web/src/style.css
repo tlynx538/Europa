@@ -3,7 +3,7 @@
 body { margin: 0; }
 button { cursor: pointer; padding: .45rem .65rem; border: 1px solid #cbd5e1; border-radius: 5px; background: white; color: inherit; }
 button:disabled { cursor: not-allowed; opacity: .5; }
-.shell { display: grid; grid-template-columns: 220px minmax(0, 1fr) 240px; min-height: 100vh; }
+.shell { display: grid; grid-template-columns: 240px minmax(0, 1fr) 280px; min-height: 100vh; }
 aside { background: white; padding: 20px; display: flex; flex-direction: column; gap: 8px; border: 1px solid #e2e8f0; }
 aside h1, aside h2 { margin: 0 0 12px; } .list { text-align: left; } footer { margin-top: auto; color: #64748b; }
 main { padding: 24px; min-width: 0; } header, .toolbar { display: flex; gap: 8px; align-items: center; } header h2 { margin-right: auto; }
@@ -11,4 +11,13 @@ main { padding: 24px; min-width: 0; } header, .toolbar { display: flex; gap: 8px
 .toolbar { padding: 8px; flex-wrap: wrap; } .toolbar span { margin-right: auto; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; } .outputs { padding: 0 12px; } .error, .alert { color: #991b1b; } .alert { padding: 12px; background: #fee2e2; }
 .muted { color: #64748b; }
+.workspace { display: contents; }
+.roadmap-panel, .discussion-panel { background: white; border: 1px solid #e2e8f0; padding: 16px; min-width: 0; overflow-wrap: anywhere; }
+.roadmap-panel { grid-column: 1; } .discussion-panel { grid-column: 3; grid-row: 1 / span 2; } main { grid-column: 2; grid-row: 1 / span 2; }
+.workspace button, .workspace select { max-width: 100%; margin: 3px; }
+.workspace textarea { display: block; width: 100%; min-height: 80px; }
+.progress-label { display: flex; justify-content: space-between; } progress { width: 100%; }
+.message { white-space: pre-wrap; border-bottom: 1px solid #e2e8f0; padding: 8px 0; }
+.conflict { padding: 12px; background: #fff7ed; border: 1px solid #fdba74; }
+.markdown-preview { padding: 0 12px; border-top: 1px solid #e2e8f0; overflow-wrap: anywhere; }
 @media (max-width: 800px) { .shell { display: flex; flex-direction: column; } aside { min-height: auto; } main { order: -1; } }

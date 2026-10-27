@@ -79,6 +79,7 @@ identifiers. JSON request bodies reject unknown fields.
 | `POST /notebooks/{id}/cells/{cell}/clear` | `{ "revision": N }`; clear code outputs/count |
 | `POST /notebooks/{id}/cells/{cell}/execute` | `{ "revision": N, "kernel_id": "...", "timeout": 30 }`; 202 receipt; kernel ID optional |
 | `GET /notebooks/{id}/executions/{execution}` | Durable receipt, result and application/conflict/uncertain state |
+| `GET /notebooks/{id}/executions?offset=0&limit=50` | Paginated recovery identities and states, excluding runtime/protocol metadata and outputs |
 
 Insert defaults to a code cell appended at the end; source/metadata/index are
 optional. Editing source requires an explicit source value. Changing cell type

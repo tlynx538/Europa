@@ -132,3 +132,18 @@ async def execute(notebook: str, cell: str, request: Request, body: Execute):
 @router.get('/{notebook}/executions/{execution}')
 async def get_execution(notebook: str, execution: str, request: Request):
     return await asyncio.to_thread(store(request).execution, notebook, execution)
+
+
+@router.get('/{notebook}/executions')
+async def list_executions(notebook: str, request: Request,
+                          offset: Annotated[int, Query(ge=0)] = 0,
+                          limit: Annotated[int, Query(ge=1, le=100)] = 50):
+    """Expose recovery identities, not private runtime or protocol metadata."""
+    receipts = await asyncio.to_thread(store(request).executions, notebook)
+    page = receipts[offset:offset + limit]
+    items = [{key: receipt[key] for key in ('execution_id', 'cell_id', 'state', 'created_at')}
+             for receipt in page]
+    for item, receipt in zip(items, page):
+        if 'result' in receipt:
+            item['result'] = {'status': receipt['result']['status']}
+    return {'items': items, 'next_offset': offset + limit if offset + limit < len(receipts) else None}

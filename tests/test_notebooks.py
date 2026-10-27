@@ -321,6 +321,12 @@ async def test_http_notebook_and_cell_contracts(store):
         tasks = tuple(execution.tasks.values()); client.release.set(); await asyncio.gather(*tasks)
         saved = (await http.get(f'/api/notebooks/{notebook}/executions/{receipt["execution_id"]}')).json()
         assert saved['state'] == 'applied'
+        listing = (await http.get(f'/api/notebooks/{notebook}/executions')).json()
+        assert listing['items'] == [{'execution_id': receipt['execution_id'], 'cell_id': cell,
+                                     'state': 'applied', 'created_at': receipt['created_at'],
+                                     'result': {'status': 'ok'}}]
+        assert listing['next_offset'] is None
+        assert (await http.get(f'/api/notebooks/{notebook}/executions?limit=101')).status_code == 422
         current = (await http.get(f'/api/notebooks/{notebook}/cells/{cell}')).json()
         assert current['cell']['outputs'][0]['text'] == '42\n'
         assert (await http.delete(f'/api/notebooks/{notebook}',params={'revision':current['revision']})).status_code == 204
