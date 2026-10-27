@@ -10,6 +10,8 @@ from internal.router import router
 from notebooks.router import router as notebook_router
 from notebooks.store import NotebookStore, NotebookError
 from notebooks.service import NotebookService
+from application.store import ApplicationStore
+from application.router import router as application_router
 from kernel.gateway_client import GatewayError
 from runtime.contracts import GatewayEndpoint, RuntimeErrorBase
 from runtime.containerd import ContainerdConfig, ContainerdRuntimeProvider
@@ -32,7 +34,7 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
         resources = None
         admission = guard = None
         registry = None
-        notebook_store = notebook_service = None
+        notebook_store = notebook_service = application_store = None
         if runtime_provider is not None:
             provider = runtime_provider
             selection = "local"
@@ -54,9 +56,13 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
                                        default_resources=resources, admission=admission)
         app.state.supervisor = supervisor
         try:
-            notebook_store = NotebookStore(os.environ.get('EUROPA_NOTEBOOK_ROOT',
+            notebook_root = Path(os.environ.get('EUROPA_NOTEBOOK_ROOT',
                 str(Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'europa/notebooks')))
+            notebook_store = NotebookStore(notebook_root)
             app.state.notebook_store = notebook_store
+            application_store = ApplicationStore(os.environ.get('EUROPA_APPLICATION_ROOT',
+                str(notebook_root / 'application')), notebook_store)
+            app.state.application_store = application_store
             if guard:
                 guard.acquire()
                 registry_path = Path(os.environ.get('EUROPA_RUNTIME_REGISTRY',
@@ -96,6 +102,8 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
                 finally:
                     await supervisor.close()
             finally:
+                if application_store:
+                    application_store.close()
                 if notebook_store:
                     notebook_store.close()
                 if registry:
@@ -124,6 +132,7 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
     app.middleware("http")(debug_middleware)
     app.include_router(router, prefix="/api", tags=["kernel"])
     app.include_router(notebook_router, prefix="/api", tags=["notebooks"])
+    app.include_router(application_router, prefix="/api", tags=["application"])
     return app
 
 

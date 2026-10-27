@@ -1,5 +1,11 @@
 # Phase 3A: notebook persistence and cell management
 
+Phase 3B now adds a separate [application persistence layer](conversational-notebooks.md)
+without changing these notebook contracts. Its prerequisite [safety review](phase3b-safety-review.md)
+defines workspace boundaries, conservative receipt retention and mandatory output
+rendering protections. The future-work statements below describe the Phase 3A
+snapshot; application projects/conversations/roadmaps/comments are implemented in 3B.
+
 Implemented on `feature/notebook-persistence`, based on
 `e3a4d4e85bceabc0364e2fa74bdab6dde2d3f89e`. The implementation commit is recorded in
 Git history and the completion response. Runtime ownership/admission, private CNI,

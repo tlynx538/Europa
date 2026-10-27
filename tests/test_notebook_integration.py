@@ -195,3 +195,36 @@ async def test_real_notebook_cannot_execute_in_another_notebooks_kernel(document
     assert rejected['state']=='uncertain' and rejected['failure']=='GatewayError'
     assert not store.open(nbid(second))['cells'][0]['outputs']
     assert s.notebooks[nbid(first)]!=s.notebooks[nbid(second)]
+
+
+async def test_real_application_history_survives_store_restart_and_project_deletion(documents, tmp_path):
+    """Application writes do not alter a live runc runtime or its Python state."""
+    from application.store import ApplicationStore
+    from application import models as m
+    from test_application import op, member, project, conversation, roadmap, task
+    s, store, service = documents
+    app = ApplicationStore(tmp_path / 'application', store)
+    try:
+        p, doc = member(app, store)
+        notebook, cell = nbid(doc), doc['cells'][0]['id']
+        doc, receipt = await executed(service, store, doc)
+        runtime = s.notebooks[notebook]
+        c = conversation(app, p, notebook)
+        message = app.message_append(c['id'], m.MessageCreate(operation_id=op(),content='Owner verified 42',cell_id=cell,execution_receipt_id=receipt['execution_id']))
+        r = roadmap(app,p,[task('verify',status='completed',accepted=True,
+            links=m.Links(notebook_id=notebook,cell_id=cell,execution_receipt_id=receipt['execution_id']),
+            evidence=[m.Evidence(summary='Verified 42',message_id=message['id'],execution_receipt_id=receipt['execution_id'])])],notebook)
+        comment = app.comment_create(notebook,m.CommentCreate(operation_id=op(),project_id=p['id'],notebook_id=notebook,cell_id=cell,content='Result checked'))
+        app.close(); app = ApplicationStore(tmp_path / 'application',store)
+        assert app.get(r['id'],'roadmap')['data']['progress']==100
+        assert app.get(comment['id'],'comment')['data']['anchor_status']=='current'
+        assert len(app.listing('message',parent=c['id'])['items'])==1
+        app.project_update(p['id'],m.ProjectUpdate(operation_id=op(),revision=2,title='Historical',status='deleted'))
+        assert s.notebooks[notebook]==runtime
+        client=await s.client_for(notebook)
+        result=await client.execute(receipt['kernel_id'],'print(6*7)')
+        assert result['reply']['status']=='ok'
+        assert store.open(notebook)==doc
+        assert (await s.providers['containerd'].inspect(runtime)).process_alive
+    finally:
+        app.close()

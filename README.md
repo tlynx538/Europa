@@ -21,6 +21,8 @@ OCI handler; experimental runsc is deferred due to its independently reproduced
 [upstream exit-status problem](docs/gvisor-exit-status-investigation.md).
 Clean containerd+runc prewarming and durable idle cleanup are configurable.
 Standard notebook persistence and cell execution are available.
+Projects, conversations, versioned roadmaps, cell comments and activity histories
+are persisted through the [Phase 3B application APIs](docs/conversational-notebooks.md).
 MCP and a frontend are not implemented.
 
 ## Reproducible environment
@@ -249,3 +251,13 @@ variables; completed results conflicting with newer edits remain in their receip
 See `docs/phase2-review.md` for migration results and limitations. Original code remains
 at Git commit `c35de54ebdb282799c58239230f7e09e4c7f6680`.
 `docs/modularOverview.png` is historical, not the current architecture.
+
+Phase 3B adds a separate private SQLite application database, selected with
+`EUROPA_APPLICATION_ROOT` (default: `application/` inside the notebook root).
+Start with `POST /api/projects` and associate a saved notebook using
+`POST /api/projects/{id}/notebooks`. Application mutations require an
+`operation_id`; mutable records also require their current `revision`.
+Project archive/delete retains notebook files, outputs, histories and runtimes.
+See the [API examples and schema](docs/conversational-notebooks.md) and
+[Phase 3A safety review](docs/phase3b-safety-review.md). No agents or frontend
+are implemented. Receipts remain retained; output content remains untrusted.

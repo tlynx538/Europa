@@ -138,3 +138,4 @@ async def gateway_client(local_gateway):
 def private_notebook_storage(tmp_path, monkeypatch):
     """Every app/child test uses disposable document storage, never the user's library."""
     monkeypatch.setenv('EUROPA_NOTEBOOK_ROOT', str(tmp_path / 'notebooks'))
+    monkeypatch.setenv('EUROPA_APPLICATION_ROOT', str(tmp_path / 'application'))
