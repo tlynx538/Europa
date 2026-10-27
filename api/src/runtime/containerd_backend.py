@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import platform
+import hashlib
 from pathlib import Path
 from typing import Protocol
 
@@ -18,12 +19,19 @@ class SDKBridgeBackend:
                  namespace: str = "europa", cni_config: str = "/etc/cni/net.d/europa.conflist",
                  cni_bin: str = "/opt/cni/bin", state_root: str = "/run/europa", timeout: float = 20):
         self.executable = executable.resolve()
-        self.socket = socket
+        self.socket = str(Path(socket).resolve())
         self.namespace = namespace
         self.cni_config = cni_config
         self.cni_bin = cni_bin
         self.state_root = state_root
         self.timeout = timeout
+        self.operation_lock = self.session_epoch = None
+
+    def set_session(self, epoch):
+        scope = str(Path(self.socket).resolve()) + ':' + self.namespace
+        identity = hashlib.sha256(scope.encode()).hexdigest()[:16]
+        self.operation_lock = f'/tmp/europa-runtime-operations-{identity}.lock'
+        self.session_epoch = epoch
 
     async def request(self, operation: str, runtime_id: str, **parameters):
         if platform.system() != "Linux":
@@ -34,6 +42,8 @@ class SDKBridgeBackend:
                    "namespace": self.namespace, "cni_config": self.cni_config,
                    "cni_bin": self.cni_bin, "state_root": self.state_root,
                    "timeout_seconds": self.timeout, **parameters}
+        if self.session_epoch:
+            request.update(operation_lock=self.operation_lock, session_epoch=self.session_epoch)
         process = None
         try:
             spawning = asyncio.create_task(asyncio.create_subprocess_exec(

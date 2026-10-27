@@ -6,12 +6,15 @@ import re
 import secrets
 import time
 import uuid
+import hashlib
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 import aiohttp
 
 from runtime.containerd_backend import ContainerdBackend
+from runtime.admission import validate_resources
 from runtime.contracts import (
     GatewayEndpoint, ResourceRequests, RuntimeErrorBase, RuntimeHandle, RuntimeSpec,
     RuntimeState, RuntimeStatus,
@@ -23,7 +26,7 @@ HANDLERS = {"runc": "io.containerd.runc.v2", "runsc": "io.containerd.runsc.v1"}
 @dataclass(frozen=True)
 class ContainerdConfig:
     image: str
-    handler: str = "runsc"
+    handler: str = "runc"
     stop_timeout: float = 5
 
     def __post_init__(self):
@@ -46,9 +49,69 @@ class ContainerdRuntimeProvider:
         self.backend, self.config = backend, config
         self._runtimes: dict[str, _Container] = {}
         self.measurements: list[dict] = []
+        self.registry = None
+
+    def recovery_scope(self):
+        return {"socket": str(Path(self.backend.socket).resolve()),
+                "namespace": self.backend.namespace, "state_root": self.backend.state_root,
+                "cni_config": self.backend.cni_config, "cni_bin": self.backend.cni_bin}
+
+    def ownership_parameters(self, runtime_id):
+        if self.registry is None:
+            return {}
+        row = self.registry.get(runtime_id)
+        if row is None:
+            raise RuntimeErrorBase("Runtime has no durable ownership record")
+        return {"owner_id": row['owner_id'], "notebook_id": row['allocation_key'],
+                "generation": row['generation']}
+
+    async def recovery_inventory(self, *, begin_recovery=False):
+        return await self.backend.request("recovery_inventory", "europa-" + "0" * 32,
+                                          begin_recovery=begin_recovery)
+
+    def restore_record(self, row, endpoint=None):
+        resources = self.registry.resources(row)
+        name = row['notebook_id'] if row['kind'] == 'assigned' else row['allocation_key']
+        spec = RuntimeSpec(name, provider='containerd', resources=resources,
+                           allocation_id=row['runtime_id'])
+        handle = RuntimeHandle(row['runtime_id'], 'containerd', name, endpoint,
+            row['generation'], RuntimeState.READY if endpoint else RuntimeState.FAILED,
+            datetime.fromtimestamp(row['created_at'], timezone.utc).isoformat())
+        self._runtimes[row['runtime_id']] = _Container(spec, handle)
+        return handle
+
+    async def verify_clean_workspace(self, row):
+        info = await self.backend.request('recovery_info', row['runtime_id'],
+                                           **self.ownership_parameters(row['runtime_id']))
+        if not info.get('workspace_empty'):
+            raise RuntimeErrorBase('Warm runtime workspace is not verified empty')
+
+    async def recover(self, row):
+        identity = row['runtime_id']
+        info = await self.backend.request('recovery_info', identity, **self.ownership_parameters(identity))
+        expected = self.registry.enforced_resources(row)
+        if info.get('image') != row['image'] or info.get('handler') != HANDLERS[row['handler']] or info.get('resources') != expected:
+            raise RuntimeErrorBase('Recovered runtime configuration does not match its reservation')
+        if info.get('state') != 'running' or not info.get('limits_verified'):
+            raise RuntimeErrorBase('Surviving runtime is not running with verified limits')
+        token = info.get('token', '')
+        if not token or hashlib.sha256(token.encode()).hexdigest() != row['token_hash']:
+            raise RuntimeErrorBase('Surviving Gateway identity could not be verified')
+        address = ipaddress.ip_address(info['private_ip'])
+        if address.version != 4 or not address.is_private or address.is_loopback or address.is_unspecified:
+            raise RuntimeErrorBase('Surviving Gateway has no valid private address')
+        handle = self.restore_record(row, GatewayEndpoint(f'http://{address}:8888', token))
+        status = await self.inspect(identity)
+        if not status.ready or not status.resource_limits_enforced:
+            raise RuntimeErrorBase('Surviving Gateway readiness could not be verified')
+        return handle
 
     @staticmethod
     def _validate_resources(resources: ResourceRequests | None):
+        try:
+            validate_resources(resources)
+        except ValueError as exc:
+            raise RuntimeErrorBase(str(exc)) from exc
         if (resources is None or resources.cpu_cores is None or resources.memory_bytes is None
                 or resources.pids_limit is None or not math.isfinite(resources.cpu_cores)):
             raise RuntimeErrorBase("Container runtimes require explicit CPU, memory, and PID limits")
@@ -63,7 +126,9 @@ class ContainerdRuntimeProvider:
             raise RuntimeErrorBase("Host working-directory mounts are not supported")
         if set(spec.environment) - {"LANG", "LC_ALL"}:
             raise RuntimeErrorBase("Container environment accepts only locale overrides")
-        runtime_id = f"europa-{uuid.uuid4().hex}"
+        runtime_id = spec.allocation_id or f"europa-{uuid.uuid4().hex}"
+        if not re.fullmatch(r"europa-[a-f0-9]{32}", runtime_id) or runtime_id in self._runtimes:
+            raise RuntimeErrorBase("Invalid or duplicate runtime allocation identity")
         handle = RuntimeHandle(runtime_id, "containerd", spec.notebook_id, None, 0,
                                RuntimeState.STOPPED, datetime.now(timezone.utc).isoformat())
         record = _Container(replace(spec, environment=dict(spec.environment)), handle)
@@ -80,12 +145,18 @@ class ContainerdRuntimeProvider:
                 started = time.monotonic()
                 await self.backend.request("create", runtime_id, image=self.config.image,
                     handler=HANDLERS[self.config.handler], notebook_id=spec.notebook_id,
-                    resources=asdict(spec.resources))
+                    resources=asdict(spec.resources), **({"owner_id": self.registry.owner_id} if self.registry else {}))
                 self.measurements.append({"runtime_id": runtime_id, "provision_seconds": time.monotonic() - started})
                 return await self._start(record)
         except BaseException:
             await self._cleanup(self.destroy(runtime_id))
             raise
+
+    async def assert_empty_namespace(self):
+        inventory = await self.backend.request("managed_inventory", "europa-" + "0" * 32)
+        expected = {"containers": 0, "tasks": 0, "snapshots": 0, "state_directories": 0}
+        if inventory != expected:
+            raise RuntimeErrorBase("Existing containerd allocations require operator reconciliation before admission")
 
     async def _ready(self, record):
         endpoint = record.handle.endpoint
@@ -108,9 +179,12 @@ class ContainerdRuntimeProvider:
         token = secrets.token_urlsafe(32)
         record.handle = replace(record.handle, state=RuntimeState.STARTING,
             generation=record.handle.generation + 1, started_at=datetime.now(timezone.utc).isoformat())
+        if self.registry:
+            self.registry.prepare_start(runtime_id, record.handle.generation, token)
         started = time.monotonic()
         response = await self.backend.request("start", runtime_id, token=token,
-                                             environment=dict(record.spec.environment))
+                                             environment=dict(record.spec.environment),
+                                             **self.ownership_parameters(runtime_id))
         address = ipaddress.ip_address(response["private_ip"])
         if address.version != 4 or not address.is_private or address.is_loopback or address.is_unspecified:
             raise RuntimeErrorBase("Backend did not return a private IPv4 endpoint")
@@ -208,8 +282,11 @@ class ContainerdRuntimeProvider:
             if record.handle.state == RuntimeState.DESTROYED:
                 return
             async def destroy_resources():
+                if self.registry:
+                    self.registry.transition(runtime_id, 'deleting')
                 started = time.monotonic()
-                await self.backend.request("destroy", runtime_id, grace_seconds=self.config.stop_timeout)
+                await self.backend.request("destroy", runtime_id, grace_seconds=self.config.stop_timeout,
+                                           **self.ownership_parameters(runtime_id))
                 record.handle = replace(record.handle, state=RuntimeState.DESTROYED, endpoint=None)
                 self.measurements.append({"runtime_id": runtime_id, "cleanup_seconds": time.monotonic() - started})
             await self._cleanup(destroy_resources())

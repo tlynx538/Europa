@@ -1,0 +1,26 @@
+:root { font: 14px system-ui, sans-serif; color: #1e293b; background: #f5f7fa; color-scheme: light; }
+* { box-sizing: border-box; } body { margin: 0; } h1 { font-size: 22px; } h2 { font-size: 19px; } h3 { font-size: 16px; }
+button, select, input, textarea { font: inherit; } button, select { padding: .45rem .65rem; border: 1px solid #cbd5e1; border-radius: 5px; background: white; color: inherit; }
+button { cursor: pointer; } button:hover:not(:disabled) { background: #eff6ff; border-color: #93c5fd; } button:disabled { cursor: not-allowed; opacity: .5; }
+:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; } a { color: #1d4ed8; } small { color: #64748b; }
+.appbar { display: flex; min-height: 56px; align-items: center; gap: 12px; padding: 10px 18px; background: #14263f; color: white; } .appbar strong { font-size: 20px; margin-right: auto; } .appbar button { color: #1e293b; }
+.shell { display: grid; min-height: calc(100vh - 56px); align-items: start; }
+main { grid-column: 3; min-width: 0; padding: 20px 24px 130px; }
+header, .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; } header h1 { margin-right: auto; } header select { max-width: 240px; }
+.toolbar { padding: 8px 0; } .toolbar span { margin-right: auto; } .toolbar small { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.cell { background: white; border: 1px solid #cbd5e1; border-radius: 7px; margin: 18px 0; overflow: hidden; } .cell > .toolbar { padding: 8px; } .cell.selected { border-color: #2563eb; box-shadow: 0 0 0 1px #2563eb; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; } .outputs { padding: 0 12px; } .outputs iframe { width: 100%; min-height: 220px; border: 0; } .outputs img { max-width: 100%; height: auto; } .outputs svg { max-width: 100%; }
+.markdown-preview { padding: 0 12px; border-top: 1px solid #e2e8f0; overflow-wrap: anywhere; }
+.error, .alert { color: #991b1b; } .alert { padding: 12px; background: #fee2e2; } .conflict { margin: 12px 0; padding: 12px; background: #fff7ed; border: 1px solid #fdba74; }
+.workspace { display: contents; } .side-panel { position: sticky; top: 0; margin: 0; width: 100%; max-width: none; max-height: 100vh; height: calc(100vh - 140px); border: 0; background: white; padding: 16px; overflow: auto; overflow-wrap: anywhere; }
+.side-panel:not([open]) { display: none; } .side-panel[open] { display: flex; flex-direction: column; gap: 8px; } .side-panel h2 { margin: 8px 0; }
+.roadmap-panel { grid-column: 1; grid-row: 1; } .discussion-panel { grid-column: 5; grid-row: 1; }
+.side-panel footer { margin-top: auto; color: #64748b; padding-top: 12px; } .close-panel { align-self: end; } .side-panel button { max-width: 100%; text-align: left; }
+.splitter { position: sticky; top: 0; grid-row: 1; height: calc(100vh - 56px); background: #e2e8f0; cursor: col-resize; touch-action: none; } .splitter:hover { background: #93c5fd; } .splitter-left { grid-column: 2; } .splitter-right { grid-column: 4; }
+.progress-label { display: flex; justify-content: space-between; } progress { width: 100%; accent-color: #2563eb; } .task { padding: 8px 0; } .task.compact { padding: 3px 0; } ol { padding-left: 18px; }
+.message { white-space: pre-wrap; border-bottom: 1px solid #e2e8f0; padding: 10px 0; } .message p { margin: 8px 0; } .message a { display: block; } .reply { padding-left: 12px; border-left: 2px solid #cbd5e1; }
+label { display: block; margin: 8px 0; } input:not([type=checkbox]), textarea { width: 100%; padding: 7px; border: 1px solid #cbd5e1; border-radius: 4px; } textarea { min-height: 80px; } label:has(input[type=checkbox]) { display: inline-flex; align-items: center; gap: 5px; }
+.badge { padding: 2px 4px; border-radius: 4px; background: #e2e8f0; } .badge.current { background: #dcfce7; } .badge.outdated { background: #ffedd5; } .badge.orphaned { background: #fee2e2; } .muted { color: #64748b; }
+.status { position: fixed; bottom: 0; left: 0; right: 0; margin: 0; background: #eaf0f8; border: 1px solid #cbd5e1; padding: 10px; display: flex; flex-wrap: wrap; gap: 8px 16px; z-index: 1; font-size: 12px; } .status small { width: 100%; }
+.editor-dialog { border: 1px solid #cbd5e1; border-radius: 8px; width: min(620px, 94vw); max-height: 90vh; overflow: auto; } dialog::backdrop { background: #0f172a88; } .editor-dialog button { margin: 8px; }
+@media (max-width: 850px) { .shell { display: block; } main { padding: 12px 12px 130px; } .appbar span { display: none; } .side-panel { position: fixed; inset: 0 auto 0 0; height: 100dvh; max-height: 100dvh; width: min(360px, 90vw); } .discussion-panel { inset: 0 0 0 auto; } .status { margin-left: 0; margin-right: 0; } }

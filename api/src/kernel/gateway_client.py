@@ -6,6 +6,7 @@ One active operation per kernel is admitted; interrupt remains available while b
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
@@ -46,6 +47,7 @@ class GatewayClient:
         self._owned: set[str] = set()
         self._busy: set[str] = set()
         self._closing = False
+        self._initial_kernel = None
 
     async def __aenter__(self):
         self._session = aiohttp.ClientSession(
@@ -71,6 +73,43 @@ class GatewayClient:
                 await self._session.close()
                 self._session = None
 
+    async def disconnect(self):
+        """Relinquish transport only; a durable runtime owner retains the kernels."""
+        self._closing = True
+        if self._session:
+            await self._session.close()
+            self._session = None
+        self._owned.clear()
+        self._initial_kernel = None
+
+    async def recover_kernels(self):
+        """Only after exclusive runtime/notebook/credential ownership is verified.
+
+        Busy or ambiguous kernels require operator reconciliation; never interrupt
+        or delete them merely to make recovery appear successful.
+        """
+        if self._owned or self._closing:
+            raise GatewayError('Kernel recovery requires a fresh open client', 503)
+        models = await self._request('GET', '/api/kernels')
+        if not isinstance(models, list) or len(models) > 4:
+            raise GatewayError('Invalid surviving kernel inventory', 503)
+        identities = []
+        for model in models:
+            if (not isinstance(model, dict) or not isinstance(model.get('id'), str)
+                    or not re.fullmatch(r'[A-Za-z0-9-]{1,128}', model['id'])
+                    or model.get('name') != 'python3' or model.get('execution_state') != 'idle'
+                    or model['id'] in identities):
+                raise GatewayError('Surviving kernels are not safely recoverable', 503)
+            identities.append(model['id'])
+        self._owned.update(identities)
+        try:
+            for identity in identities:
+                await self.wait_ready(identity)
+        except BaseException:
+            self._owned.clear()
+            raise
+        return models
+
     def _session_ready(self) -> aiohttp.ClientSession:
         if self._session is None:
             raise GatewayError("Gateway client is not open", 503)
@@ -93,6 +132,14 @@ class GatewayClient:
     async def health(self):
         return await self._request("GET", "/api/kernelspecs")
 
+    async def list_kernels(self):
+        return await self._request('GET', '/api/kernels')
+
+    def offer_initial_kernel(self, model, consume):
+        """Deliver an assigned runtime's bootstrapped kernel through the existing start API."""
+        self._known(model['id'])
+        self._initial_kernel = (model, consume)
+
     def _known(self, kernel_id: str):
         if self._closing:
             raise GatewayError("Gateway client is closing", 503)
@@ -108,6 +155,23 @@ class GatewayClient:
     async def create_kernel(self, name: str = "python3"):
         if self._closing:
             raise GatewayError("Gateway client is closing", 503)
+        if self._initial_kernel and self._initial_kernel[0]['name'] == name:
+            model, consume = self._initial_kernel
+            kernel_id = model['id']
+            self._admit(kernel_id)
+            try:
+                await self.wait_ready(kernel_id)
+                current = await self.inspect_kernel(kernel_id)
+                if current.get('id') != kernel_id:
+                    raise GatewayError('Initial kernel identity changed', 503)
+                consume()
+                self._initial_kernel = None
+                return current
+            except BaseException:
+                await self._abort(kernel_id)
+                raise
+            finally:
+                self._busy.discard(kernel_id)
         # env={} selects KG environment filtering instead of implicit inheritance.
         model = await self._request("POST", "/api/kernels", json={"name": name, "env": {}})
         kernel_id = model["id"]
@@ -145,6 +209,9 @@ class GatewayClient:
         except GatewayError as exc:
             if exc.status_code != 404:
                 raise
+        if self._initial_kernel and self._initial_kernel[0]['id'] == kernel_id:
+            self._initial_kernel[1]()
+            self._initial_kernel = None
         self._owned.discard(kernel_id)
 
     async def terminate_kernel(self, kernel_id: str):
@@ -155,6 +222,8 @@ class GatewayClient:
             self._busy.discard(kernel_id)
 
     async def _abort(self, kernel_id: str):
+        if getattr(self, '_durable_detaching', False):
+            return  # Control-plane shutdown leaves remote execution and journal uncertainty intact.
         task = asyncio.create_task(self._delete(kernel_id))
         try:
             await asyncio.shield(task)

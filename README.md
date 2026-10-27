@@ -7,13 +7,71 @@ The Gateway client uses only HTTP and WebSocket APIs; it has no Jupyter process
 manager, ZeroMQ reader, or custom kernel wrapper. Runtime providers own either
 development subprocesses or containerd tasks through a separate provisioning layer.
 
-Validation on this host covers **trusted local development** and mocked containerd
-behavior. Real container isolation remains unverified. A virtual environment and temporary
-working directory do not isolate hostile Python from the host. Execute trusted
-code only. Gateway and Europa are bound to `127.0.0.1`; Gateway authentication is
-mandatory. Europa has no end-user authentication and must remain on loopback.
-The containerd adapter is opt-in and requires approved Linux infrastructure.
-No prewarming, MCP, or frontend is implemented.
+Validation covers **trusted local development**, mocked containerd behavior, and
+real containerd+runc execution on an ARM64 Lima VM. See the
+[runc validation report](docs/step2b-runc-validation.md) for measured limits,
+cleanup, and benchmarks. Runc containers share the host Linux kernel; they are
+not equivalent to gVisor for untrusted-code isolation. A virtual environment and
+temporary working directory do not isolate hostile Python from the host.
+Europa and local Gateways bind to loopback; container Gateways are reachable only
+through the approved private CNI network. Gateway authentication is mandatory.
+Europa has no end-user authentication and must remain on loopback. The containerd
+adapter is opt-in and requires approved Linux infrastructure. Runc is its default
+OCI handler; experimental runsc is deferred due to its independently reproduced
+[upstream exit-status problem](docs/gvisor-exit-status-investigation.md).
+Clean containerd+runc prewarming and durable idle cleanup are configurable.
+Standard notebook persistence and cell execution are available.
+Projects, conversations, versioned roadmaps, cell comments and activity histories
+are persisted through the [Phase 3B application APIs](docs/conversational-notebooks.md).
+MCP and agents are not implemented. The owner-facing notebook UI is in `web/`.
+
+### Owner notebook UI (Phase 3E)
+
+Build the UI once, then run the loopback API as described below. FastAPI serves
+the built UI at `http://127.0.0.1:8000/` with restrictive browser security headers:
+
+```sh
+cd web
+npm ci
+npm run build
+cd ..
+```
+
+For frontend development, `npm run dev` starts a loopback Vite server proxying `/api`
+to `127.0.0.1:8000`. Do not expose either server to a network. Browser mutations must
+be same-origin. Production uses one FastAPI process, not the Vite development server.
+
+The UI supports projects, notebook membership, versioned task editing and owner
+acceptance, threaded discussions, cell comments and contextual activity. Sidebars
+resize/collapse on desktop and become modal drawers on mobile. CodeMirror supports
+Python highlighting, Shift+Enter to save/run, and Cmd/Ctrl+S to save. Autosave uses
+serialized revision-checked writes; conflicts pause autosave for explicit comparison.
+Browser-local drafts and exact pending application operation IDs survive refresh.
+Keep the same browser origin/port for that recovery storage; clearing site data
+removes drafts, not saved server documents. Browser storage is not encrypted and
+is not a backup. Saved outputs do **not** checkpoint Python variables.
+
+Receipt history reconnects independently of cell markers. Saved results refresh
+automatically without dropping local drafts. Interrupt targets an existing verified
+receipt/kernel binding without provisioning a new runtime. A disconnection never
+means cancellation. Conflicted outputs can be inspected, dismissed, or explicitly
+copied into an unchanged-source cell with a revision-checked document save. Such
+copies carry provenance and do not turn conflict receipts into successful evidence.
+
+Markdown disables raw HTML, remote images and links. HTML/tables and static SVG
+outputs are strictly sanitized and rendered in scriptless, opaque-origin sandboxed
+iframes with a no-network CSP. Embedded PNG/JPEG images are signature/dimension/size
+limited. Plotly data has a limited static scatter/bar preview, **not** an interactive
+Plotly engine. JavaScript, widgets and unsupported MIME remain inert and preserved.
+No uploads, agents, LLM providers, MCP, or multi-user authentication are added. Details,
+validation and remaining limitations are in [Phase 3E UI](docs/phase3e-ui.md).
+
+Frontend checks are `npm test` and `npm run build` in `web/`. The browser test
+`npm run test:browser` builds the UI, starts a disposable loopback API and executes
+trusted Python using the local Gateway provider. It requires the repository `.venv`
+and Chrome; set `EUROPA_CHROME` to the Chrome executable if it is not installed at
+the macOS default path. Set `EUROPA_TEST_TMP` to an appropriate private temporary
+directory. Test notebook data is retained in a newly created temporary directory.
 
 ## Reproducible environment
 
@@ -138,7 +196,8 @@ and 50 completed metadata records.
 - Restart returns after readiness, replacing an unobservable background task.
 - Shutdown returns 204; host PIDs/custom wrapper statistics are no longer API contracts.
 - `/api/kernel/install-packages` returns 501; installation is outside this milestone.
-- Ownership is per application instance; multiple workers do not share a registry.
+- Local/external ownership is per application instance. Durable containerd ownership
+  uses a private single-writer registry; multiple workers are unsupported.
 
 ## Tests
 
@@ -195,9 +254,58 @@ Step 2B adds an opt-in containerd provider using the supported Go SDK and native
 `runc`/`runsc` handlers. Local development remains the default. See
 [containerd provider review](docs/containerd-provider.md) for configuration, the
 digest-pinned Gateway image, actual tests and benchmarks, and Linux prerequisites.
-Real container tests are explicitly skipped on the current macOS host; container
-isolation has not been validated. No warm pool or MCP integration is included.
+Real runc tests run inside Linux using `--run-containerd` and explicit operator
+configuration; `-k runc` selects the 14 runc scenarios while runsc is deferred.
+Local development remains the fallback when `EUROPA_RUNTIME_PROVIDER` is unset.
+The Step 2B implementation is extended by the clean warm pool below; MCP remains outside scope.
+
+Step 2C adds [single-node resource admission](docs/resource-admission.md) to managed
+containerd notebooks: configurable CPU/memory/PID profiles, detected Linux capacity,
+host reserves, atomic reservations, verified limits and cleanup-aware release.
+The default profile is 0.5 CPU, 512 MiB and 128 PIDs. Use
+`POST /api/runtime/provision?notebook_id=A&resource_profile=PROFILE` to select a
+configured profile and `GET /api/runtime/admission` for accounting metrics.
+Local development retains its existing behavior and has no enforced resource budget.
+
+Step 2D adds [durable runtime recovery](docs/runtime-recovery.md) with SQLite,
+startup inventory reconciliation, verified surviving kernel adoption and fenced SDK
+operations. Set `EUROPA_RUNTIME_REGISTRY` to private persistent local storage.
+Durable containerd shutdown preserves runtimes; explicitly delete them through
+`DELETE /api/runtime?notebook_id=A`. `GET /api/runtime/recovery` reports blockers
+and operator states. Local process adoption remains unsupported.
+
+Step 2E adds [clean runtime prewarming](docs/runtime-prewarming.md): a fully reserved,
+durably unassigned Gateway with zero kernels and an empty workspace. The default
+`EUROPA_WARM_TARGET=1` keeps at most one ready container when capacity permits;
+`0` disables and reclaims the unassigned pool. `EUROPA_WARM_PROFILE` selects its
+resource profile. Claims commit atomically before kernel startup, and assigned
+containers never return to the pool. `GET /api/runtime/pool` reports readiness,
+capacity deferrals and resource accounting. Local development has no warm pool.
+
+Step 2F adds [durable runtime activity, session leases and idle cleanup](docs/runtime-lifecycle.md).
+Assigned containerd notebooks default to a 30-minute idle timeout with 30-second
+grace and sweep intervals. `EUROPA_IDLE_CLEANUP=0` disables automatic retirement.
+Active operations remain protected after HTTP disconnect; uncertain crash leftovers
+retain reservations for reconciliation. `GET /api/runtime/activity` reports activity
+and uncertainty. Unassigned warm containers keep their separate pool policy.
+
+Phase 3A adds [standard notebook persistence and cell APIs](docs/notebook-persistence.md).
+`EUROPA_NOTEBOOK_ROOT` selects private durable storage, independent of runtime
+filesystems. `/api/notebooks` supports revision-checked notebook/cell management;
+cell execution returns a durable receipt and saves standard Jupyter outputs.
+Runtime deletion leaves documents intact. Saved notebooks do not checkpoint Python
+variables; completed results conflicting with newer edits remain in their receipts.
 
 See `docs/phase2-review.md` for migration results and limitations. Original code remains
 at Git commit `c35de54ebdb282799c58239230f7e09e4c7f6680`.
 `docs/modularOverview.png` is historical, not the current architecture.
+
+Phase 3B adds a separate private SQLite application database, selected with
+`EUROPA_APPLICATION_ROOT` (default: `application/` inside the notebook root).
+Start with `POST /api/projects` and associate a saved notebook using
+`POST /api/projects/{id}/notebooks`. Application mutations require an
+`operation_id`; mutable records also require their current `revision`.
+Project archive/delete retains notebook files, outputs, histories and runtimes.
+See the [API examples and schema](docs/conversational-notebooks.md) and
+[Phase 3A safety review](docs/phase3b-safety-review.md). No agents or frontend
+are implemented. Receipts remain retained; output content remains untrusted.

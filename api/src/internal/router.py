@@ -67,12 +67,61 @@ async def runtime_status(request: Request, notebook_id: str = "default"):
 
 
 @router.post("/runtime/provision", status_code=201)
-async def provision_runtime(request: Request, notebook_id: Annotated[str, Query(min_length=1, max_length=128, pattern=r".*\S.*")]):
-    await request.app.state.supervisor.client_for(notebook_id)
+async def provision_runtime(request: Request, notebook_id: Annotated[str, Query(min_length=1, max_length=128, pattern=r".*\S.*")],
+                            resource_profile: Annotated[str | None, Query(min_length=1, max_length=64, pattern=r".*\S.*")] = None):
+    await request.app.state.supervisor.client_for(notebook_id, resource_profile=resource_profile)
     return await request.app.state.supervisor.status_for(notebook_id)
+
+
+@router.get("/runtime/admission")
+async def admission_status(request: Request):
+    return await request.app.state.supervisor.admission_status()
+
+
+@router.get("/runtime/recovery")
+async def recovery_status(request: Request):
+    supervisor = request.app.state.supervisor
+    if supervisor.registry is None:
+        return {"enabled": False, "reason": "Local/external process adoption is unsupported"}
+    return {"enabled": True, **await supervisor.recovery_status()}
+
+
+@router.get('/runtime/pool')
+async def warm_pool_status(request: Request):
+    pool = getattr(request.app.state.supervisor, 'pool', None)
+    return pool.status() if pool else {'enabled': False, 'reason': 'Prewarming requires durable containerd ownership'}
 
 
 @router.delete("/runtime", status_code=204)
 async def destroy_runtime(request: Request, notebook_id: str = "default"):
     await request.app.state.supervisor.destroy_notebook(notebook_id)
+    return Response(status_code=204)
+
+
+@router.get('/runtime/activity')
+async def activity_status(request: Request):
+    lifecycle = getattr(request.app.state.supervisor, 'lifecycle', None)
+    return lifecycle.status() if lifecycle else {'enabled': False, 'reason': 'Durable idle cleanup requires containerd ownership'}
+
+
+@router.post('/runtime/lease', status_code=201)
+async def acquire_runtime_lease(request: Request, notebook_id: str = 'default',
+                              kind: Annotated[str, Query(pattern='^(interactive|agent)$')] = 'interactive',
+                              ttl: Annotated[float, Query(gt=0, le=300)] = 300):
+    lifecycle = getattr(request.app.state.supervisor, 'lifecycle', None)
+    if lifecycle is None:
+        raise HTTPException(501, 'Durable session leases require containerd ownership')
+    return await lifecycle.lease(notebook_id, kind, ttl)
+
+
+@router.delete('/runtime/lease', status_code=204)
+async def release_runtime_lease(request: Request, notebook_id: str = 'default'):
+    lifecycle = getattr(request.app.state.supervisor, 'lifecycle', None)
+    if lifecycle is None:
+        raise HTTPException(501, 'Durable session leases require containerd ownership')
+    # Bearer material stays out of URLs and access logs.
+    token = request.headers.get('X-Europa-Lease', '')
+    if not 1 <= len(token) <= 128:
+        raise HTTPException(422, 'X-Europa-Lease header required')
+    await lifecycle.release(notebook_id, token)
     return Response(status_code=204)

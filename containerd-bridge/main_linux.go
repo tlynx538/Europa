@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -45,6 +46,14 @@ func main() {
 	ctx, cancel := context.WithTimeout(namespaces.WithNamespace(context.Background(), r.Namespace),
 		time.Duration(r.Timeout*float64(time.Second)))
 	defer cancel()
+	if r.OperationLock != "" {
+		file, err := lockSession(ctx, r)
+		if err != nil {
+			emit(nil, err)
+			return
+		}
+		defer file.Close()
+	}
 	client, err := containerd.New(r.Socket)
 	if err != nil {
 		emit(nil, err)
@@ -53,6 +62,85 @@ func main() {
 	defer client.Close()
 	result, err := dispatch(ctx, client, r)
 	emit(result, err)
+}
+
+func lockSession(ctx context.Context, r request) (*os.File, error) {
+	if !filepath.IsAbs(r.OperationLock) || !regexpEpoch(r.SessionEpoch) {
+		return nil, errors.New("invalid fence")
+	}
+	fd, err := unix.Open(r.OperationLock, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), r.OperationLock)
+	ok := false
+	defer func() {
+		if !ok {
+			file.Close()
+		}
+	}()
+	var info unix.Stat_t
+	if err = unix.Fstat(fd, &info); err != nil {
+		return nil, err
+	}
+	if info.Uid != uint32(os.Geteuid()) || info.Mode&0077 != 0 || info.Mode&unix.S_IFMT != unix.S_IFREG {
+		return nil, errors.New("unsafe fence file")
+	}
+	for {
+		err = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if err != unix.EWOULDBLOCK && err != unix.EAGAIN {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if r.BeginRecovery {
+		if err = file.Truncate(0); err != nil {
+			return nil, err
+		}
+		if _, err = file.WriteAt([]byte(r.SessionEpoch), 0); err != nil {
+			return nil, err
+		}
+		if err = file.Sync(); err != nil {
+			return nil, err
+		}
+	} else {
+		data := make([]byte, 64)
+		n, _ := file.ReadAt(data, 0)
+		if string(data[:n]) != r.SessionEpoch {
+			return nil, errors.New("stale control-plane session")
+		}
+	}
+	ok = true
+	return file, nil
+}
+
+func regexpEpoch(value string) bool {
+	if len(value) != 32 {
+		return false
+	}
+	for _, c := range value {
+		if !(c >= 'a' && c <= 'f' || c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func emptyWorkspace(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	entries, err := file.ReadDir(1)
+	return len(entries) == 0 && err == io.EOF
 }
 
 func emit(result map[string]interface{}, err error) {
@@ -81,8 +169,162 @@ func owned(ctx context.Context, client *containerd.Client, id string) (container
 	return c, nil
 }
 
+func verifyContainer(info containers.Container, r request, generation bool) error {
+	if info.ID != r.ID || info.SnapshotKey != r.ID+"-rootfs" || info.Snapshotter != "overlayfs" {
+		return errors.New("durable container/snapshot identity mismatch")
+	}
+	return verifyOwner(info.Labels, r, generation)
+}
+
 func dispatch(ctx context.Context, client *containerd.Client, r request) (map[string]interface{}, error) {
 	switch r.Operation {
+	case "recovery_inventory":
+		// Only the explicitly dedicated Europa namespace is queried. No other
+		// namespace or workload is examined or changed.
+		cs, err := client.Containers(ctx)
+		if err != nil {
+			return nil, err
+		}
+		items := []map[string]interface{}{}
+		for _, c := range cs {
+			info, err := c.Info(ctx)
+			if err != nil {
+				return nil, err
+			}
+			s, err := c.Spec(ctx)
+			if err != nil {
+				return nil, err
+			}
+			limits, err := specResources(s)
+			if err != nil {
+				return nil, err
+			}
+			handler := strings.TrimPrefix(info.Runtime.Name, "io.containerd.")
+			handler = strings.Split(handler, ".")[0]
+			items = append(items, map[string]interface{}{"id": info.ID, "labels": info.Labels,
+				"image": info.Image, "handler": handler, "resources": limits})
+		}
+		ts, err := client.TaskService().List(ctx, &taskapi.ListTasksRequest{})
+		if err != nil {
+			return nil, err
+		}
+		tasks := []string{}
+		for _, task := range ts.Tasks {
+			tasks = append(tasks, task.ID)
+		}
+		snaps := []map[string]interface{}{}
+		err = client.SnapshotService("overlayfs").Walk(ctx, func(ctx context.Context, info snapshots.Info) error {
+			if info.Kind == snapshots.KindActive || info.Labels["europa.runtime_id"] != "" {
+				id := strings.TrimSuffix(info.Name, "-rootfs")
+				snaps = append(snaps, map[string]interface{}{"id": id, "labels": info.Labels})
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		entries, err := os.ReadDir(r.StateRoot)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		states := []string{}
+		for _, entry := range entries {
+			states = append(states, entry.Name())
+		}
+		return map[string]interface{}{"containers": items, "tasks": tasks, "snapshots": snaps, "state_directories": states}, nil
+	case "recovery_info":
+		if r.OwnerID == "" {
+			return nil, errors.New("durable owner required")
+		}
+		c, err := owned(ctx, client, r.ID)
+		if err != nil {
+			return nil, err
+		}
+		info, err := c.Info(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err = verifyContainer(info, r, true); err != nil {
+			return nil, err
+		}
+		s, err := c.Spec(ctx)
+		if err != nil {
+			return nil, err
+		}
+		limits, err := specResources(s)
+		if err != nil {
+			return nil, err
+		}
+		task, err := c.Task(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+		status, err := task.Status(ctx)
+		if err != nil {
+			return nil, err
+		}
+		result := map[string]interface{}{"image": info.Image, "handler": info.Runtime.Name,
+			"resources": limits, "state": string(status.Status)}
+		if status.Status != containerd.Running {
+			return result, nil
+		}
+		for k, v := range cgroupObservation(task.Pid(), s) {
+			result[k] = v
+		}
+		data, err := os.ReadFile(filepath.Join(r.StateRoot, r.ID, "ownership.json"))
+		if err != nil {
+			return nil, err
+		}
+		var labels map[string]string
+		if err = json.Unmarshal(data, &labels); err != nil {
+			return nil, err
+		}
+		if err = verifyOwner(labels, r, true); err != nil {
+			return nil, err
+		}
+		data, err = os.ReadFile(filepath.Join(r.StateRoot, r.ID, "network.json"))
+		if err != nil {
+			return nil, err
+		}
+		var network networkState
+		if err = json.Unmarshal(data, &network); err != nil {
+			return nil, err
+		}
+		result["private_ip"] = network.IP
+		result["workspace_empty"] = emptyWorkspace(fmt.Sprintf("/proc/%d/root/workspace", task.Pid()))
+		for _, value := range s.Process.Env {
+			if strings.HasPrefix(value, "KG_AUTH_TOKEN=") {
+				result["token"] = strings.TrimPrefix(value, "KG_AUTH_TOKEN=")
+			}
+		}
+		return result, nil
+	case "managed_inventory":
+		// Admission starts only from an empty managed namespace. Never delete
+		// unknown allocations or infer that untracked workloads have no cost.
+		cs, err := client.Containers(ctx)
+		if err != nil {
+			return nil, err
+		}
+		ts, err := client.TaskService().List(ctx, &taskapi.ListTasksRequest{})
+		if err != nil {
+			return nil, err
+		}
+		count := 0
+		err = client.SnapshotService("overlayfs").Walk(ctx, func(ctx context.Context, info snapshots.Info) error {
+			if info.Labels["europa.runtime_id"] != "" || strings.HasSuffix(info.Name, "-rootfs") {
+				count++
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		entries, err := os.ReadDir(r.StateRoot)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		return map[string]interface{}{"containers": len(cs), "tasks": len(ts.Tasks),
+			"snapshots": count, "state_directories": len(entries)}, nil
 	case "image":
 		started := time.Now()
 		image, err := client.GetImage(ctx, r.Image)
@@ -111,9 +353,9 @@ func dispatch(ctx context.Context, client *containerd.Client, r request) (map[st
 		}
 		_, err = client.NewContainer(ctx, r.ID,
 			containerd.WithImage(image), containerd.WithSnapshotter("overlayfs"),
-			containerd.WithNewSnapshot(r.ID+"-rootfs", image, snapshots.WithLabels(map[string]string{"europa.runtime_id": r.ID})),
+			containerd.WithNewSnapshot(r.ID+"-rootfs", image, snapshots.WithLabels(ownershipLabels(r))),
 			containerd.WithRuntime(r.Handler, nil),
-			containerd.WithContainerLabels(map[string]string{"europa.runtime_id": r.ID, "europa.notebook_id": r.NotebookID}),
+			containerd.WithContainerLabels(ownershipLabels(r)),
 			containerd.WithNewSpec(oci.WithImageConfig(image), seccomp.WithDefaultProfile(), func(ctx context.Context, client oci.Client, c *containers.Container, s *specs.Spec) error {
 				harden(s, r.Resources)
 				return nil
@@ -141,7 +383,7 @@ func dispatch(ctx context.Context, client *containerd.Client, r request) (map[st
 		if err != nil {
 			return nil, err
 		}
-		result := map[string]interface{}{"state": string(status.Status), "exit_code": status.ExitStatus,
+		result := map[string]interface{}{"state": string(status.Status), "exit_code": status.ExitStatus, "pid": task.Pid(),
 			"limits_configured": true}
 		spec, specErr := c.Spec(ctx)
 		if specErr == nil && status.Status == containerd.Running {
@@ -167,6 +409,44 @@ func dispatch(ctx context.Context, client *containerd.Client, r request) (map[st
 		}
 		return map[string]interface{}{}, task.Kill(ctx, sig, containerd.WithKillAll)
 	case "destroy":
+		if r.OwnerID != "" {
+			// Check every surviving durable identity before destructive SDK calls.
+			c, err := owned(ctx, client, r.ID)
+			if err == nil {
+				info, err := c.Info(ctx)
+				if err != nil {
+					return nil, err
+				}
+				if err = verifyContainer(info, r, false); err != nil {
+					return nil, err
+				}
+			} else if !errdefs.IsNotFound(err) {
+				return nil, err
+			}
+			info, err := client.SnapshotService("overlayfs").Stat(ctx, r.ID+"-rootfs")
+			if err == nil {
+				if err = verifyOwner(info.Labels, r, false); err != nil {
+					return nil, err
+				}
+			} else if !errdefs.IsNotFound(err) {
+				return nil, err
+			}
+			if _, err = os.Stat(filepath.Join(r.StateRoot, r.ID)); err == nil {
+				data, err := os.ReadFile(filepath.Join(r.StateRoot, r.ID, "ownership.json"))
+				if err != nil {
+					return nil, err
+				}
+				var labels map[string]string
+				if err = json.Unmarshal(data, &labels); err != nil {
+					return nil, err
+				}
+				if err = verifyOwner(labels, r, false); err != nil {
+					return nil, err
+				}
+			} else if !os.IsNotExist(err) {
+				return nil, err
+			}
+		}
 		stopped, err := stopTask(ctx, client, r)
 		if err != nil {
 			return nil, err
@@ -242,6 +522,15 @@ func startTask(ctx context.Context, client *containerd.Client, r request) (map[s
 	if err != nil {
 		return nil, err
 	}
+	if r.OwnerID != "" {
+		info, err := c.Info(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err = verifyContainer(info, r, false); err != nil {
+			return nil, err
+		}
+	}
 	s, err := c.Spec(ctx)
 	if err != nil {
 		return nil, err
@@ -268,6 +557,9 @@ func startTask(ctx context.Context, client *containerd.Client, r request) (map[s
 			return err
 		}
 		info.Spec = value
+		if r.OwnerID != "" {
+			info.Labels["europa.generation"] = strconv.FormatInt(r.Generation, 10)
+		}
 		return nil
 	}); err != nil {
 		return nil, err
@@ -279,6 +571,15 @@ func startTask(ctx context.Context, client *containerd.Client, r request) (map[s
 	dir := filepath.Join(r.StateRoot, r.ID)
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
+	}
+	if r.OwnerID != "" {
+		data, err := json.Marshal(ownershipLabels(r))
+		if err != nil {
+			return nil, err
+		}
+		if err = os.WriteFile(filepath.Join(dir, "ownership.json"), data, 0600); err != nil {
+			return nil, err
+		}
 	}
 	nsPath := filepath.Join(dir, "netns")
 	file, err := os.OpenFile(nsPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
