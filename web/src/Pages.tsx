@@ -105,19 +105,22 @@ export function ProjectDetail({ id, navigate }: BrowserProps & { id: string }) {
 
 export function NotebookLibrary({ navigate, currentNotebookId, onNotebookDeleted }: BrowserProps & { currentNotebookId?: string; onNotebookDeleted?: (id: string) => void }) {
   const [notebooks, setNotebooks] = useState<Meta[]>([]), [query, setQuery] = useState(''), [loadError, setLoadError] = useState('')
+  const [sort, setSort] = useState('title-asc'), [loaded, setLoaded] = useState(false)
   const [projects, setProjects] = useState<RecordData<Project>[]>([])
   const { busy, error, run } = useOperation()
-  const refresh = async () => { const [n, p] = await Promise.all([request<Meta[]>('/notebooks'), all<Project>('/projects')]); setNotebooks(n); setProjects(p) }
-  useEffect(() => { let live = true; void Promise.all([request<Meta[]>('/notebooks'), all<Project>('/projects')]).then(([n, p]) => { if (live) { setNotebooks(n); setProjects(p) } }).catch(e => { if (live) setLoadError(String(e)) }); return () => { live = false } }, [])
-  return <main className="browser-page"><h1>Notebooks</h1>{(error || loadError) && <p role="alert" className="alert">{error || loadError}</p>}
+  const refresh = async () => { const [n, p] = await Promise.all([request<Meta[]>('/notebooks'), all<Project>('/projects')]); setNotebooks(n); setProjects(p); setLoaded(true) }
+  useEffect(() => { let live = true; void Promise.all([request<Meta[]>('/notebooks'), all<Project>('/projects')]).then(([n, p]) => { if (live) { setNotebooks(n); setProjects(p); setLoaded(true) } }).catch(e => { if (live) setLoadError(String(e)) }); return () => { live = false } }, [])
+  const visible = notebooks.filter(n => n.title.toLowerCase().includes(query.toLowerCase())).sort((a, b) => sort === 'revision-desc' ? b.revision - a.revision || a.title.localeCompare(b.title) : sort === 'title-desc' ? b.title.localeCompare(a.title) : a.title.localeCompare(b.title))
+  return <main className="browser-page notebook-browser"><div className="browser-heading"><div><h1>Notebooks</h1><p className="muted">Saved notebooks · {notebooks.length} total</p></div></div>{(error || loadError) && <p role="alert" className="alert">{error || loadError}</p>}
     <button disabled={busy} onClick={() => void run(async () => {
       const title = prompt('Notebook title')?.trim(); if (!title) return
       const created = await request<{ metadata: { europa: Meta } }>('/notebooks', json('POST', { title }))
       await navigate(notebookUrl(created.metadata.europa.notebook_id)); await refresh()
     })}>New notebook</button>
-    <label>Search notebooks <input type="search" value={query} onChange={e => setQuery(e.target.value)} /></label>
-    <ul className="browser-list">{notebooks.filter(n => n.title.toLowerCase().includes(query.toLowerCase())).map(n => <li key={n.notebook_id}>
+    <div className="browser-filters"><label>Search notebooks <input type="search" value={query} onChange={e => setQuery(e.target.value)} /></label><label>Sort notebooks <select value={sort} onChange={e => setSort(e.target.value)}><option value="title-asc">Title A–Z</option><option value="title-desc">Title Z–A</option><option value="revision-desc">Revision (highest first)</option></select></label></div>
+    <ul className="browser-list">{visible.map(n => <li key={n.notebook_id}>
       <a href={notebookUrl(n.notebook_id)} onClick={e => { e.preventDefault(); void navigate(notebookUrl(n.notebook_id)) }}>{n.title}</a>
+      <span>Revision {n.revision}</span>
       {(() => { const p = projects.find(p => p.data.notebooks.some(member => member.notebook_id === n.notebook_id)); return p ? <a href={projectUrl(p.id)} onClick={e => { e.preventDefault(); void navigate(projectUrl(p.id)) }}>{p.data.title}</a> : <span>Standalone</span> })()}
       <button disabled={busy} onClick={() => void run(async () => {
         const title = prompt('Notebook title', n.title)?.trim(); if (!title) return
@@ -134,6 +137,7 @@ export function NotebookLibrary({ navigate, currentNotebookId, onNotebookDeleted
         } else onNotebookDeleted?.(n.notebook_id)
         await refresh()
       })}>Delete</button>{localStorage.getItem(`europa.drafts.${n.notebook_id}`) && <small>Save or discard browser drafts before deleting.</small>}</li>)}</ul>
+    {loaded && visible.length === 0 && <p className="browser-empty">{notebooks.length ? 'No notebooks match your search.' : query ? 'No notebooks match your search. Create a notebook to get started.' : 'No notebooks yet. Create a notebook to get started.'}</p>}
   </main>
 }
 

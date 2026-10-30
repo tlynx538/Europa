@@ -1,18 +1,23 @@
 import { test, expect } from '@playwright/test'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 test('production UI recovers after an actual backend process restart', async ({ page, request }, info) => {
-  const root = mkdtempSync(join(process.env.EUROPA_TEST_TMP || tmpdir(), 'europa-restart-'))
+  const root = mkdtempSync(join(realpathSync(process.env.EUROPA_TEST_TMP || tmpdir()), 'europa-restart-'))
   const url = 'http://127.0.0.1:18100'
   let backend: ChildProcess | undefined
+  let stderr = ''
   const start = async () => {
+    stderr = ''
     backend = spawn(resolve('../.venv/bin/python'), ['-m', 'uvicorn', 'main:app', '--app-dir', resolve('../api/src'), '--host', '127.0.0.1', '--port', '18100'], {
-      env: { ...process.env, EUROPA_NOTEBOOK_ROOT: join(root, 'notebooks'), EUROPA_APPLICATION_ROOT: join(root, 'application'), EUROPA_RUNTIME_PROVIDER: 'local', EUROPA_GATEWAY_URL: '', EUROPA_GATEWAY_TOKEN: '' }, stdio: 'ignore',
+      env: { ...process.env, EUROPA_NOTEBOOK_ROOT: join(root, 'notebooks'), EUROPA_APPLICATION_ROOT: join(root, 'application'), EUROPA_RUNTIME_PROVIDER: 'local', EUROPA_GATEWAY_URL: '', EUROPA_GATEWAY_TOKEN: '' }, stdio: ['ignore', 'ignore', 'pipe'],
     })
-    await expect.poll(async () => { if (backend?.exitCode !== null) return false; try { return (await request.get(`${url}/api/notebooks`)).ok() } catch { return false } }, { timeout: 30000 }).toBe(true)
+    backend.stderr?.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-4000) })
+    try {
+      await expect.poll(async () => { if (backend?.exitCode !== null) throw new Error(`Backend exited ${backend?.exitCode}`); try { return (await request.get(`${url}/api/notebooks`)).ok() } catch { return false } }, { timeout: 30000 }).toBe(true)
+    } catch (error) { throw new Error(`Backend failed to start at ${url}: ${String(error)}\n${stderr}`) }
   }
   const stop = async () => {
     const process = backend
@@ -36,7 +41,7 @@ test('production UI recovers after an actual backend process restart', async ({ 
     await page.getByRole('button', { name: 'Roadmap', exact: true }).click()
     await expect(page.getByLabel('Project', { exact: true })).toHaveValue(project.id)
     await page.getByRole('button', { name: 'Discussion', exact: true }).click()
-    await page.getByRole('button', { name: 'Run', exact: true }).click()
+    await page.locator('.cell .cm-content').first().click(); await page.getByRole('toolbar', { name: 'Notebook commands' }).getByRole('button', { name: 'Run selected cell' }).click()
     await expect(page.locator('.cell .outputs')).toContainText('123', { timeout: 45000 })
     await stop()
     await expect(page.getByRole('status')).toContainText('reconnecting', { timeout: 10000 })

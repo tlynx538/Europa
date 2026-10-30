@@ -81,6 +81,25 @@ it('shows project association and standalone notebook status', async () => {
   expect(screen.getByText('Standalone')).toBeTruthy()
 })
 
+it('sorts notebook records and shows saved revision metadata in the notebook browser', async () => {
+  vi.stubGlobal('fetch', async (url: string) => new Response(JSON.stringify(url.includes('/projects?') ? { items: [], next_cursor: null } : [
+    { notebook_id: 'b', title: 'Beta', revision: 2 }, { notebook_id: 'a', title: 'Alpha', revision: 5 },
+  ])))
+  render(<NotebookLibrary navigate={async () => true} />)
+  await screen.findByRole('link', { name: 'Alpha' })
+  fireEvent.change(screen.getByRole('combobox', { name: 'Sort notebooks' }), { target: { value: 'title-desc' } })
+  expect(screen.getAllByRole('link', { name: /^(Alpha|Beta)$/ }).map(link => link.textContent)).toEqual(['Beta', 'Alpha'])
+  expect(screen.getByText(/Revision 5/)).toBeTruthy()
+})
+
+it('distinguishes an empty notebook library from search with no matches', async () => {
+  vi.stubGlobal('fetch', async (url: string) => new Response(JSON.stringify(url.includes('/projects?') ? { items: [], next_cursor: null } : [])))
+  render(<NotebookLibrary navigate={async () => true} />)
+  expect(await screen.findByText(/No notebooks yet/)).toBeTruthy()
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Search notebooks' }), { target: { value: 'missing' } })
+  expect(screen.getByText(/No notebooks match/)).toBeTruthy()
+})
+
 it('shows server roadmap, conversation and activity in project sections', async () => {
   vi.stubGlobal('fetch', async (url: string) => new Response(JSON.stringify(url.endsWith('/projects/one') ? { id: 'one', revision: 1, data: { title: 'One', status: 'active', notebooks: [] } }
     : url.endsWith('/notebooks') ? [] : { items: url.includes('/roadmaps?') ? [{ id: 'r', data: { objective: 'Ship', progress: 50, tasks: [] } }] : url.includes('/conversations?') ? [{ id: 'c', data: { title: 'Planning' } }] : url.includes('/activities?') ? [{ id: 'a', data: { summary: 'Reviewed', result: 'done' } }] : [], next_cursor: null })))

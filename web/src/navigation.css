@@ -1,5 +1,6 @@
 .navigation { min-height: 100vh; background: var(--canvas, #f8fafc); color: var(--ink, #17202a); }
 .navigation-bar { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem 1rem; padding: .65rem clamp(1rem, 3vw, 2rem); border-bottom: 1px solid var(--line, #cbd5e1); background: var(--surface, white); }
+.navigation:has(.notebook-editor) > .navigation-bar { display: none; }
 .navigation-bar strong { margin-right: 1rem; font-size: 1.2rem; letter-spacing: -.025em; }
 .navigation-bar a { color: var(--ink, #17202a); text-decoration: none; padding: .45rem .65rem; border-radius: 5px; }
 .navigation-bar a:hover, .navigation-bar a[aria-current="page"] { color: var(--accent, #2563eb); background: var(--tint, #eff6ff); }
@@ -10,6 +11,8 @@
 .browser-page section { margin: 1.4rem 0; }
 .browser-page label { display: grid; gap: .45rem; width: min(100%, 26rem); margin: 1.4rem 0 .65rem; font-weight: 550; }
 .browser-page input[type="search"], .browser-page select { width: 100%; min-width: 0; margin: 0; padding: .55rem .7rem; font-weight: 400; }
+.notebook-browser .browser-filters { display: flex; flex-wrap: wrap; gap: 0 16px; align-items: end; }
+.notebook-browser .browser-filters label { flex: 1 1 220px; }
 .browser-page a { color: var(--ink, #17202a); text-decoration: none; text-underline-offset: .2em; }
 .browser-page a:hover { color: var(--accent, #2563eb); text-decoration: underline; }
 .browser-page a:focus-visible, .navigation-bar a:focus-visible { outline: 2px solid var(--accent, #2563eb); outline-offset: 2px; }
