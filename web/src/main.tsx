@@ -8,7 +8,7 @@ import { python } from '@codemirror/lang-python'
 import { request, type Receipt } from './api'
 import { Outputs } from './Output'
 import { Workspace } from './Workspace'
-import { CommentIndicator, Layout } from './Layout'
+import { CommentIndicator, HeaderSlot, Layout, StatusSlot } from './Layout'
 import { source, useNotebook, type Meta } from './useNotebook'
 import './style.css'
 
@@ -29,16 +29,15 @@ function App() {
     if (selectedCell) document.getElementById(`cell-${selectedCell}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }, [selectedCell, id])
   const latest = Object.fromEntries(receipts.map(r => [r.cell_id, r]))
-  return <Layout><main>
-    <header><h1>{doc?.metadata.europa.title ?? 'Notebook'}</h1><select aria-label="Notebook" value={id ?? ''} disabled={busy} onChange={e => { if (e.target.value) void nb.open(e.target.value) }}><option value="">Open notebook</option>{list.map(n => <option key={n.notebook_id} value={n.notebook_id}>{n.title}</option>)}</select>
+  return <Layout><HeaderSlot><select aria-label="Notebook" value={id ?? ''} disabled={busy} onChange={e => { if (e.target.value) void nb.open(e.target.value) }}><option value="">Open notebook</option>{list.map(n => <option key={n.notebook_id} value={n.notebook_id}>{n.title}</option>)}</select><span className="save-indicator">{dirty ? 'Unsaved draft' : doc ? 'Saved' : ''}</span><details className="appbar-more"><summary>More</summary><div>
+    {doc && <><button disabled={busy || dirty} onClick={() => { const title = prompt('Notebook title', doc.metadata.europa.title)?.trim(); if (title) void nb.mutate('', { title }, 'PATCH') }}>Rename</button><button disabled={busy} onClick={() => { if (!dirty || confirm('Discard browser drafts and reload saved notebook?')) void nb.open(id!, true) }}>Reload saved notebook</button><button aria-pressed={activity} onClick={() => setActivity(!activity)}>{activity ? 'Notebook only' : 'Contextual activity'}</button></>}
+  </div></details></HeaderSlot><main>
+    <header><h1>{doc?.metadata.europa.title ?? 'Notebook'}</h1>
       <button disabled={busy || dirty} onClick={() => { const title = prompt('Notebook title')?.trim(); if (title) void nb.create(title) }}>New notebook</button>
     </header>
     {doc && <div className="toolbar">
-      <button disabled={busy || dirty} onClick={() => { const title = prompt('Notebook title', doc.metadata.europa.title)?.trim(); if (title) void nb.mutate('', { title }, 'PATCH') }}>Rename</button>
-      <button disabled={busy} onClick={() => { if (!dirty || confirm('Discard browser drafts and reload saved notebook?')) void nb.open(id!, true) }}>Reload saved notebook</button>
       <label><input type="checkbox" checked={nb.autosave} onChange={e => nb.setAutosave(e.target.checked)} />Autosave</label>
       <button disabled={busy || !dirty || !!remote} onClick={() => void nb.save()}>Save all</button>
-      <button aria-pressed={activity} onClick={() => setActivity(!activity)}>{activity ? 'Notebook only' : 'Contextual activity'}</button>
       <span>Revision {doc.metadata.europa.revision}</span>
     </div>}
     {error && <p role="alert" className="alert">{error}</p>}
@@ -57,9 +56,11 @@ function App() {
         {cell.cell_type === 'code' && <button disabled={busy || nb.active || nb.paused} onClick={() => void nb.execute(cell.id)}>Run</button>}
         {latest[cell.id]?.state === 'running' && <button disabled={busy} onClick={() => void nb.action(async () => { await request(`/notebooks/${id}/executions/${latest[cell.id].execution_id}/interrupt`, { method: 'POST' }); nb.setError('Interrupt requested; waiting for the authoritative receipt result.') })}>Interrupt</button>}
         {cell.cell_type === 'markdown' && <button onClick={() => setPreview(p => ({ ...p, [cell.id]: p[cell.id] === false }))}>{preview[cell.id] === false ? 'Preview' : 'Hide preview'}</button>}
-        <button aria-label={`Move cell ${index + 1} up`} disabled={busy || nb.active || index === 0} onClick={() => void nb.mutate(`/cells/${cell.id}/move`, { index: index - 1 })}>↑</button>
-        <button aria-label={`Move cell ${index + 1} down`} disabled={busy || nb.active || index === doc.cells.length - 1} onClick={() => void nb.mutate(`/cells/${cell.id}/move`, { index: index + 1 })}>↓</button>
-        <button disabled={busy || nb.active} onClick={() => { if (confirm('Delete this cell?')) void nb.remove(cell.id) }}>Delete</button>
+        <details className="cell-actions"><summary>Cell actions</summary><div>
+          <button aria-label={`Move cell ${index + 1} up`} disabled={busy || nb.active || index === 0} onClick={() => void nb.mutate(`/cells/${cell.id}/move`, { index: index - 1 })}>↑</button>
+          <button aria-label={`Move cell ${index + 1} down`} disabled={busy || nb.active || index === doc.cells.length - 1} onClick={() => void nb.mutate(`/cells/${cell.id}/move`, { index: index + 1 })}>↓</button>
+          <button disabled={busy || nb.active} onClick={() => { if (confirm('Delete this cell?')) void nb.remove(cell.id) }}>Delete</button>
+        </div></details>
       </div>
       <CodeMirror value={drafts[cell.id] ?? source(cell)} extensions={[
         ...(cell.cell_type === 'code' ? [python()] : []),
@@ -76,8 +77,16 @@ function App() {
     {conflictResult && <section className="conflict"><h2>Conflict output — not applied</h2><p>Receipt {conflictResult.execution_id}. Newer edits are unchanged. You may explicitly copy historical output only if the source still matches. The receipt will remain conflict, never execution evidence of success. Re-run reviewed code for a fresh result.</p><Outputs outputs={conflictResult.result?.outputs ?? []} />
       <button disabled={busy || dirty || nb.active} onClick={() => { if (confirm('Replace this cell’s saved outputs with historical conflict output? Source must match and the current revision must still be valid.')) void nb.importConflict(conflictResult) }}>Copy historical output to unchanged cell</button>{' '}
       <button onClick={() => setConflictResult(null)}>Dismiss preview (receipt retained)</button></section>}
-    <footer className="status" role="status"><span>API: {nb.connection}</span><span>Kernel: {nb.session.state} ({nb.session.kernels})</span><span>{busy ? 'Saving / requesting…' : nb.paused ? 'Autosave paused' : dirty ? 'Unsaved draft (browser recovery)' : doc ? 'Document saved' : 'No notebook selected'}</span><span>{nb.active ? 'Runtime executing' : 'No pending receipt'}</span><span>Agents: not implemented</span><small>Saved outputs do not checkpoint Python variables.</small></footer>
-  </main><Workspace notebookId={id} revision={doc?.metadata.europa.revision} cells={doc?.cells ?? []} selectedCell={selectedCell} showActivity={activity} onCommentCounts={updateCounts} onOpenNotebook={(notebook, cell) => { if (notebook === id) { if (cell) { setSelectedCell(cell); document.getElementById(`cell-${cell}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) } } else void nb.open(notebook).then(() => { if (cell) setSelectedCell(cell) }) }} /></Layout>
+    <StatusSlot><footer className="status" role="status"><details><summary><span>API: {nb.connection}</span><span>Kernel: {nb.session.state} ({nb.session.kernels})</span><span>{busy ? 'Saving / requesting…' : nb.paused ? 'Autosave paused' : dirty ? 'Unsaved draft (browser recovery)' : doc ? 'Document saved' : 'No notebook selected'}</span><span>{nb.active ? 'Pending execution receipt' : 'No pending receipt'}{receipts.some(r => r.state === 'uncertain') ? ' · Uncertain receipt — review history' : ''}</span></summary><div className="status-details"><small>Saved outputs do not checkpoint Python variables. Execution history and receipts remain available in the notebook.</small></div></details></footer></StatusSlot>
+  </main><Workspace notebookId={id} revision={doc?.metadata.europa.revision} cells={doc?.cells ?? []} selectedCell={selectedCell} showActivity={activity} onCommentCounts={updateCounts} onOpenNotebook={async (notebook, cell) => {
+    const target = notebook === id ? doc : await nb.open(notebook)
+    if (!target) return false
+    if (cell && target.cells.some(c => c.id === cell)) {
+      setSelectedCell(cell)
+      if (notebook === id) document.getElementById(`cell-${cell}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+    return true
+  }} /></Layout>
 }
 
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>)

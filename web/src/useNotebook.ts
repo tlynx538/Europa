@@ -37,13 +37,13 @@ export function useNotebook() {
   const active = receipts.some(r => !terminalReceipt(r.state))
 
   const open = async (notebook: string, discard = false) => {
-    if (locked.current) return
-    if (dirty && !discard && !confirm('Keep drafts in this browser and switch notebooks?')) return
+    if (locked.current) return null
+    if (dirty && !discard && !confirm('Keep drafts in this browser and switch notebooks?')) return null
     const token = ++epoch.current
     locked.current = true; setBusy(true)
     try {
       const next = await request<Notebook>(`/notebooks/${notebook}`)
-      if (token !== epoch.current) return
+      if (token !== epoch.current) return null
       let restored: Drafts = {}, revision = next.metadata.europa.revision, needsReview = false
       if (!discard) {
         const stored = localStorage.getItem(draftKey(notebook))
@@ -54,7 +54,8 @@ export function useNotebook() {
       docUpdate(next); persist(restored, next); setReceipts([]); setRemote(null); setError('')
       if (conflict) { setRemote(next); setError('Saved revision changed or drafts require review. Review recovered drafts explicitly.') }
       localStorage.setItem('europa.notebook', notebook)
-    } catch (e) { setError(String(e)) } finally { locked.current = false; setBusy(false) }
+      return next
+    } catch (e) { setError(String(e)); return null } finally { locked.current = false; setBusy(false) }
   }
   useEffect(() => {
     const last = localStorage.getItem('europa.notebook')

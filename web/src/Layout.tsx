@@ -1,7 +1,18 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 
 const Panels = createContext<{ left: boolean; right: boolean; setLeft: (v: boolean) => void; setRight: (v: boolean) => void; mobile: boolean }>({ left: true, right: true, setLeft: () => {}, setRight: () => {}, mobile: false })
 export const usePanels = () => useContext(Panels)
+const HeaderTarget = createContext<HTMLElement | null>(null)
+const StatusTarget = createContext<{ target: HTMLElement | null; docked: boolean; setTarget: (node: HTMLElement | null) => void }>({ target: null, docked: false, setTarget: () => {} })
+export function HeaderSlot({ children }: { children: ReactNode }) {
+  const target = useContext(HeaderTarget)
+  return target ? createPortal(children, target) : null
+}
+export function StatusSlot({ children }: { children: ReactNode }) {
+  const { target, docked } = useContext(StatusTarget)
+  return docked && target ? createPortal(children, target) : children
+}
 const storedWidth = (side: string, fallback: number) => Math.max(220, Math.min(480, Number(localStorage.getItem(`europa.width.${side}`)) || fallback))
 
 export function CommentIndicator({ cell, count }: { cell: string; count: number }) {
@@ -13,13 +24,15 @@ export function CommentIndicator({ cell, count }: { cell: string; count: number 
 }
 
 export function Layout({ children }: { children: ReactNode }) {
-  const [mobile, setMobile] = useState(() => matchMedia('(max-width: 850px)').matches)
+  const [headerTarget, setHeaderTarget] = useState<HTMLElement | null>(null)
+  const [statusTarget, setStatusTarget] = useState<HTMLElement | null>(null)
+  const [mobile, setMobile] = useState(() => matchMedia('(max-width: 1100px)').matches)
   const [left, setLeft] = useState(() => !mobile && localStorage.getItem('europa.panel.left') !== 'false')
   const [right, setRight] = useState(() => !mobile && localStorage.getItem('europa.panel.right') !== 'false')
   const [leftWidth, setLeftWidth] = useState(() => storedWidth('left', 270))
   const [rightWidth, setRightWidth] = useState(() => storedWidth('right', 310))
   useEffect(() => {
-    const query = matchMedia('(max-width: 850px)')
+    const query = matchMedia('(max-width: 1100px)')
     const change = () => { setMobile(query.matches); setLeft(!query.matches && localStorage.getItem('europa.panel.left') !== 'false'); setRight(!query.matches && localStorage.getItem('europa.panel.right') !== 'false') }
     query.addEventListener('change', change); return () => query.removeEventListener('change', change)
   }, [])
@@ -33,24 +46,25 @@ export function Layout({ children }: { children: ReactNode }) {
     onKeyDown={e => { if (['ArrowLeft', 'ArrowRight'].includes(e.key)) { e.preventDefault(); resize(side, value + (e.key === 'ArrowRight' ? 20 : -20) * (side === 'left' ? 1 : -1)) } }}
     onPointerDown={e => { e.currentTarget.setPointerCapture(e.pointerId) }}
     onPointerMove={e => { if (e.currentTarget.hasPointerCapture(e.pointerId)) resize(side, side === 'left' ? e.clientX : innerWidth - e.clientX) }} />
-  return <Panels.Provider value={{ left, right, setLeft, setRight, mobile }}>
-    <nav className="appbar"><strong>Europa</strong><button aria-expanded={left} onClick={() => setLeft(!left)}>Roadmap</button><button aria-expanded={right} onClick={() => setRight(!right)}>Discussion</button><span>Owner workspace · localhost</span></nav>
-    <div className="shell" style={{ gridTemplateColumns: `${left ? `${leftWidth}px 8px` : '0px 0px'} minmax(0,1fr) ${right ? `8px ${rightWidth}px` : '0px 0px'}` }}>
+  return <Panels.Provider value={{ left, right, setLeft, setRight, mobile }}><HeaderTarget.Provider value={headerTarget}><StatusTarget.Provider value={{ target: statusTarget, docked: left && !mobile, setTarget: setStatusTarget }}>
+    <nav className="appbar"><strong>Europa</strong><div className="appbar-switchers" ref={setHeaderTarget} /><button aria-expanded={left} onClick={() => setLeft(!left)}>Roadmap</button><button aria-expanded={right} onClick={() => setRight(!right)}>Discussion</button></nav>
+    <div className="shell" style={{ gridTemplateColumns: `${left ? `minmax(0, ${leftWidth}px) 8px` : '0px 0px'} minmax(0,1fr) ${right ? `8px minmax(0, ${rightWidth}px)` : '0px 0px'}` }}>
       {children}{!mobile && left && handle('left', leftWidth)}{!mobile && right && handle('right', rightWidth)}
     </div>
-  </Panels.Provider>
+  </StatusTarget.Provider></HeaderTarget.Provider></Panels.Provider>
 }
 
 export function SidePanel({ side, children }: { side: 'left' | 'right'; children: ReactNode }) {
   const context = useContext(Panels)
   const open = context[side], change = side === 'left' ? context.setLeft : context.setRight
   const ref = useRef<HTMLDialogElement>(null)
+  const setStatusTarget = useContext(StatusTarget)
   useEffect(() => {
     const dialog = ref.current!
     dialog.close()
     if (open) { if (context.mobile) dialog.showModal(); else dialog.show() }
   }, [open, context.mobile])
   return <dialog ref={ref} className={`side-panel ${side === 'left' ? 'roadmap-panel' : 'discussion-panel'}`} id={side === 'right' ? 'discussion' : 'roadmap'} aria-label={side === 'left' ? 'Project and roadmap' : 'Discussion'} onCancel={() => change(false)}>
-    <button className="close-panel" onClick={() => change(false)}>Close {side === 'left' ? 'roadmap' : 'discussion'}</button>{children}
+    <button className="close-panel" onClick={() => change(false)}>Close {side === 'left' ? 'roadmap' : 'discussion'}</button>{children}{side === 'left' && <div className="panel-status" ref={setStatusTarget.setTarget} />}
   </dialog>
 }
