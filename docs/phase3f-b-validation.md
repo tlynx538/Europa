@@ -4,6 +4,7 @@
 
 Branch: `feature/phase3f-b-navigation`. Base: Phase 3F UI refinement commit
 `c0a3f01d22a9c08100908e835166f965116a4791` on `feature/ui-refinement`.
+Implementation commit: `1ab13e072ed99c35aaefb81fc049b0cbd650c762`.
 The starting working tree was clean. The previous editor combined notebook editing,
 project selectors, roadmap controls, and discussion in one screen, with both
 sidebars open by default and a dark-green-oriented palette. Its reference
