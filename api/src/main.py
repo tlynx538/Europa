@@ -150,6 +150,11 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
     async def runtime_error(_: Request, exc: RuntimeErrorBase):
         return JSONResponse(status_code=503, content={"detail": str(exc)})
 
+    @app.get('/activity')
+    @app.get('/notebooks/{notebook_id}')
+    @app.get('/notebooks')
+    @app.get('/projects/{project_id}')
+    @app.get('/projects')
     @app.get("/")
     async def home():
         index = Path(__file__).resolve().parents[2] / 'web' / 'dist' / 'index.html'

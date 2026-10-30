@@ -7,7 +7,16 @@ async function seed(request: APIRequestContext, title: string, code = 'print(42)
   const cellResponse = await request.post(`${api}/notebooks/${id}/cells`, { data: { revision: 1, source: code, cell_type: cellType } }); expect(cellResponse.status()).toBe(201)
   return { id, doc: await cellResponse.json() }
 }
-async function open(page: Page, id: string) { await page.goto('/'); await page.getByLabel('Notebook', { exact: true }).selectOption(id); await expect(page.locator('.cell')).toBeVisible() }
+async function open(page: Page, id: string) {
+  await page.goto(`/notebooks/${id}`)
+  await expect(page).toHaveURL(new RegExp(`/notebooks/${id}$`))
+  await expect(page.locator('.cell').first()).toBeVisible()
+}
+async function panel(page: Page, name: 'Roadmap' | 'Discussion') {
+  const toggle = page.getByRole('button', { name, exact: true })
+  if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+}
 async function post(request: APIRequestContext, path: string, body: object) {
   const response = await request.post(`${api}${path}`, { data: { operation_id: crypto.randomUUID(), ...body } }); expect([200, 201, 202]).toContain(response.status()); return response.json()
 }
@@ -21,7 +30,8 @@ test('owner workflow, task editing, threads, anchors and refresh persistence', a
   const project = await post(request, '/projects', { title: 'Owner project' })
   await post(request, `/projects/${project.id}/notebooks`, { revision: 1, notebook_id: id })
   await page.reload()
-  await page.getByLabel('Project', { exact: true }).selectOption(project.id)
+  await panel(page, 'Roadmap')
+  await expect(page.getByLabel('Project', { exact: true })).toHaveValue(project.id)
   const roadmapAnswers = ['Investigate results', 'Inspect output', 'Owner verifies output']
   const dialogs = async (dialog: import('@playwright/test').Dialog) => { await dialog.accept(roadmapAnswers.shift() ?? '') }
   page.on('dialog', dialogs)
@@ -36,6 +46,7 @@ test('owner workflow, task editing, threads, anchors and refresh persistence', a
   await page.getByRole('button', { name: 'Save task', exact: true }).click()
   await expect(page.getByRole('progressbar', { name: 'Overall project progress' })).toHaveAttribute('value', '100')
   page.once('dialog', d => d.accept('Check this result'))
+  await panel(page, 'Discussion')
   await page.getByRole('button', { name: 'Comment on cell' }).click()
   await expect(page.getByText('Check this result')).toBeVisible()
   await expect(page.getByRole('link', { name: '1 comments' })).toBeVisible()
@@ -49,6 +60,7 @@ test('owner workflow, task editing, threads, anchors and refresh persistence', a
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page.locator('article.message').filter({ hasText: 'Owner follow-up' })).toBeVisible()
   await page.reload()
+  await expect(page.getByLabel('Project', { exact: true })).toHaveValue(project.id)
   await expect(page.locator('.cell .outputs')).toContainText('42')
   await expect(page.getByText('A persisted message', { exact: true })).toBeVisible()
   await expect(page.getByText('Check this result')).toBeVisible()
@@ -112,7 +124,7 @@ test('rich output and Markdown cannot execute scripts or automatically fetch res
   expect((await request.put(`${api}/notebooks/${id}`, { data: { revision: 2, document: full } })).status()).toBe(200)
   let external = false
   page.on('request', r => { if (r.url().includes('example.invalid')) external = true })
-  await page.goto('/'); await page.getByLabel('Notebook', { exact: true }).selectOption(id)
+  await open(page, id)
   await expect(page.locator('.markdown-preview')).toContainText('[Image: x]')
   const frame = page.frameLocator('iframe[title="Isolated notebook output"]')
   await expect(frame.locator('td')).toHaveText('Safe table 42')
@@ -123,8 +135,12 @@ test('rich output and Markdown cannot execute scripts or automatically fetch res
   await page.screenshot({ path: info.outputPath('safe-output.png'), fullPage: true })
 })
 
-test('sidebar resizing, persisted collapse and modal mobile drawers', async ({ page }, info) => {
-  await page.goto('/')
+test('sidebar resizing, persisted collapse and modal mobile drawers', async ({ page, request }, info) => {
+  const { id } = await seed(request, 'Sidebar notebook')
+  await open(page, id)
+  await expect(page.getByRole('button', { name: 'Roadmap', exact: true })).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.getByRole('button', { name: 'Discussion', exact: true })).toHaveAttribute('aria-expanded', 'false')
+  await panel(page, 'Roadmap')
   const splitter = page.getByRole('separator', { name: 'Resize left sidebar' })
   await splitter.focus(); await page.keyboard.press('ArrowRight')
   await expect(splitter).toHaveAttribute('aria-valuenow', '290')
@@ -150,22 +166,25 @@ test('linked notebook navigation keeps drafts and drawer on cancellation, then t
   const roadmap = await post(request, '/roadmaps', { project_id: project.id, objective: 'Navigate safely', tasks: [{ id: 'linked', title: 'Linked task', acceptance_criteria: ['Inspect code'], links: { notebook_id: second.id, cell_id: second.doc.cells[0].id } }] })
   expect(roadmap.data.tasks).toHaveLength(1)
   await open(page, first.id)
-  await page.getByLabel('Project', { exact: true }).selectOption(project.id)
+  await panel(page, 'Roadmap')
+  await expect(page.getByLabel('Project', { exact: true })).toHaveValue(project.id)
   await page.getByLabel('Autosave', { exact: true }).uncheck()
   const editor = page.locator('.cm-content')
   await editor.click(); await editor.press('ControlOrMeta+A'); await page.keyboard.insertText('unsaved local draft')
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.getByRole('button', { name: 'Roadmap', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Roadmap', exact: true })).toHaveAttribute('aria-expanded', 'false')
+  await panel(page, 'Roadmap')
+  await expect(page.getByRole('dialog', { name: 'Project and roadmap' })).toBeVisible()
   page.once('dialog', dialog => dialog.dismiss())
   await page.getByRole('button', { name: /Linked task/ }).click()
   await expect(page.getByRole('dialog', { name: 'Project and roadmap' })).toBeVisible()
-  await expect(page.getByLabel('Notebook', { exact: true })).toHaveValue(first.id)
+  await expect(page).toHaveURL(new RegExp(`/notebooks/${first.id}$`))
   await page.getByRole('button', { name: 'Close roadmap' }).click()
   await expect(editor).toContainText('unsaved local draft')
   await page.getByRole('button', { name: 'Roadmap', exact: true }).click()
   page.once('dialog', dialog => dialog.accept())
   await page.getByRole('button', { name: /Linked task/ }).click()
-  await expect(page.getByLabel('Notebook', { exact: true })).toHaveValue(second.id)
+  await expect(page).toHaveURL(new RegExp(`/notebooks/${second.id}$`))
   await expect(page.locator(`#cell-${second.doc.cells[0].id}`)).toHaveClass(/selected/)
   await expect(page.getByRole('dialog', { name: 'Project and roadmap' })).not.toBeVisible()
   expect(await page.evaluate(id => localStorage.getItem(`europa.drafts.${id}`), first.id)).toContain('unsaved local draft')
@@ -187,6 +206,8 @@ test('operational status stays in roadmap on desktop and in notebook when drawer
   const { id } = await seed(request, 'Status placement')
   await open(page, id)
   const status = page.getByRole('status')
+  await expect(page.locator('main [role="status"]')).toBeVisible()
+  await panel(page, 'Roadmap')
   await expect(page.locator('#roadmap [role="status"]')).toBeVisible()
   await expect(status).toContainText('API:')
   await expect(status).toContainText('Kernel:')
@@ -213,9 +234,13 @@ test('receipt polling reconnects after transport loss without cancelling executi
 })
 
 test('lost application response replays its exact operation without duplicating a message', async ({ page, request }) => {
+  const { id } = await seed(request, 'Replay notebook')
   const project = await post(request, '/projects', { title: 'Replay project' })
+  await post(request, `/projects/${project.id}/notebooks`, { revision: 1, notebook_id: id })
   const conversation = await post(request, '/conversations', { project_id: project.id })
-  await page.goto('/'); await page.getByLabel('Project', { exact: true }).selectOption(project.id)
+  await open(page, id)
+  await panel(page, 'Discussion')
+  await expect(page.getByLabel('Project', { exact: true })).toHaveValue(project.id)
   await expect(page.getByLabel('Message', { exact: true })).toBeVisible()
   let drop = true
   await page.route(`**/conversations/${conversation.id}/messages`, async route => {
@@ -224,8 +249,10 @@ test('lost application response replays its exact operation without duplicating 
   })
   await page.getByLabel('Message', { exact: true }).fill('Replay me once')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await panel(page, 'Roadmap')
   await expect(page.getByRole('button', { name: 'Retry pending operation' })).toBeVisible()
   await page.reload()
+  await panel(page, 'Roadmap')
   await page.getByRole('button', { name: 'Retry pending operation' }).click()
   await expect(page.getByRole('button', { name: 'Retry pending operation' })).toHaveCount(0)
   const history = await (await request.get(`${api}/conversations/${conversation.id}/messages`)).json()
@@ -266,7 +293,9 @@ test('comment anchors navigate and retain outdated and orphaned history', async 
   const project = await post(request, '/projects', { title: 'Anchor project' })
   await post(request, `/projects/${project.id}/notebooks`, { revision: 1, notebook_id: id })
   await post(request, `/notebooks/${id}/comments`, { project_id: project.id, notebook_id: id, cell_id: cell, content: 'Persistent anchor' })
-  await open(page, id); await page.getByLabel('Project', { exact: true }).selectOption(project.id)
+  await open(page, id)
+  await panel(page, 'Discussion')
+  await expect(page.getByLabel('Project', { exact: true })).toHaveValue(project.id)
   await page.getByRole('button', { name: `Cell ${cell} · current` }).click()
   await expect(page.locator('.cell')).toHaveClass(/selected/)
   await page.locator('.cm-content').click(); await page.keyboard.press('ControlOrMeta+A'); await page.keyboard.insertText('print(43)')

@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
-const Panels = createContext<{ left: boolean; right: boolean; setLeft: (v: boolean) => void; setRight: (v: boolean) => void; mobile: boolean }>({ left: true, right: true, setLeft: () => {}, setRight: () => {}, mobile: false })
+const Panels = createContext<{ left: boolean; right: boolean; setLeft: (v: boolean) => void; setRight: (v: boolean) => void; mobile: boolean }>({ left: false, right: false, setLeft: () => {}, setRight: () => {}, mobile: false })
 export const usePanels = () => useContext(Panels)
 const HeaderTarget = createContext<HTMLElement | null>(null)
 const StatusTarget = createContext<{ target: HTMLElement | null; docked: boolean; setTarget: (node: HTMLElement | null) => void }>({ target: null, docked: false, setTarget: () => {} })
@@ -27,13 +27,13 @@ export function Layout({ children }: { children: ReactNode }) {
   const [headerTarget, setHeaderTarget] = useState<HTMLElement | null>(null)
   const [statusTarget, setStatusTarget] = useState<HTMLElement | null>(null)
   const [mobile, setMobile] = useState(() => matchMedia('(max-width: 1100px)').matches)
-  const [left, setLeft] = useState(() => !mobile && localStorage.getItem('europa.panel.left') !== 'false')
-  const [right, setRight] = useState(() => !mobile && localStorage.getItem('europa.panel.right') !== 'false')
+  const [left, setLeft] = useState(() => !mobile && localStorage.getItem('europa.panel.left') === 'true')
+  const [right, setRight] = useState(() => !mobile && localStorage.getItem('europa.panel.right') === 'true')
   const [leftWidth, setLeftWidth] = useState(() => storedWidth('left', 270))
   const [rightWidth, setRightWidth] = useState(() => storedWidth('right', 310))
   useEffect(() => {
     const query = matchMedia('(max-width: 1100px)')
-    const change = () => { setMobile(query.matches); setLeft(!query.matches && localStorage.getItem('europa.panel.left') !== 'false'); setRight(!query.matches && localStorage.getItem('europa.panel.right') !== 'false') }
+    const change = () => { setMobile(query.matches); setLeft(!query.matches && localStorage.getItem('europa.panel.left') === 'true'); setRight(!query.matches && localStorage.getItem('europa.panel.right') === 'true') }
     query.addEventListener('change', change); return () => query.removeEventListener('change', change)
   }, [])
   useEffect(() => { if (!mobile) { localStorage.setItem('europa.panel.left', String(left)); localStorage.setItem('europa.panel.right', String(right)) } }, [left, right, mobile])
@@ -47,7 +47,7 @@ export function Layout({ children }: { children: ReactNode }) {
     onPointerDown={e => { e.currentTarget.setPointerCapture(e.pointerId) }}
     onPointerMove={e => { if (e.currentTarget.hasPointerCapture(e.pointerId)) resize(side, side === 'left' ? e.clientX : innerWidth - e.clientX) }} />
   return <Panels.Provider value={{ left, right, setLeft, setRight, mobile }}><HeaderTarget.Provider value={headerTarget}><StatusTarget.Provider value={{ target: statusTarget, docked: left && !mobile, setTarget: setStatusTarget }}>
-    <nav className="appbar"><strong>Europa</strong><div className="appbar-switchers" ref={setHeaderTarget} /><button aria-expanded={left} onClick={() => setLeft(!left)}>Roadmap</button><button aria-expanded={right} onClick={() => setRight(!right)}>Discussion</button></nav>
+    <nav className="appbar" aria-label="Notebook workspace"><div className="appbar-switchers" ref={setHeaderTarget} /><button aria-expanded={left} onClick={() => setLeft(!left)}>Roadmap</button><button aria-expanded={right} onClick={() => setRight(!right)}>Discussion</button></nav>
     <div className="shell" style={{ gridTemplateColumns: `${left ? `minmax(0, ${leftWidth}px) 8px` : '0px 0px'} minmax(0,1fr) ${right ? `8px minmax(0, ${rightWidth}px)` : '0px 0px'}` }}>
       {children}{!mobile && left && handle('left', leftWidth)}{!mobile && right && handle('right', rightWidth)}
     </div>

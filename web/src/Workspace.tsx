@@ -14,6 +14,7 @@ export function Workspace({ notebookId, cells, selectedCell, showActivity, revis
   const [activities, setActivities] = useState<RecordData<Activity>[]>([])
   const [conversationId, setConversationId] = useState(''), [message, setMessage] = useState(''), [reply, setReply] = useState<string | null>(null), [needsInput, setNeedsInput] = useState(false)
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [pending, setPending] = useState(!!pendingMutation())
+  const [contextNotice, setContextNotice] = useState('')
   const [editing, setEditing] = useState<{ roadmap: RecordData<Roadmap>; task: Task; newTask: boolean } | null>(null)
   const [taskFilter, setTaskFilter] = useState<string | null>(null)
   const generation = useRef(0), locked = useRef(false)
@@ -27,9 +28,21 @@ export function Workspace({ notebookId, cells, selectedCell, showActivity, revis
     localStorage.setItem('europa.project', id)
   }, [])
   useEffect(() => {
-    void all<Project>('/projects').then(setProjects).catch(e => setError(String(e)))
-    const last = localStorage.getItem('europa.project'); if (last) void loadProject(last).catch(e => setError(String(e)))
-  }, [loadProject])
+    const reload = () => { if (!document.hidden) void all<Project>('/projects').then(setProjects).catch(e => setError(String(e))) }
+    reload()
+    window.addEventListener('focus', reload); document.addEventListener('visibilitychange', reload)
+    return () => { window.removeEventListener('focus', reload); document.removeEventListener('visibilitychange', reload) }
+  }, [])
+  useEffect(() => {
+    if (!notebookId) return
+    const matching = projects.find(p => p.data.notebooks.some(n => n.notebook_id === notebookId && n.present))
+    if (matching) { setContextNotice(''); void loadProject(matching.id).catch(e => setError(String(e))) }
+    else if (project) {
+      setContextNotice(`Project context cleared: ${project.data.title} is not linked to this notebook.`)
+      ++generation.current; setProject(null); setRoadmaps([]); setConversations([]); setConversationId(''); setActivities([])
+      localStorage.removeItem('europa.project')
+    }
+  }, [notebookId, projects])
   const loadComments = useCallback(async () => notebookId ? all<Comment>(`/notebooks/${notebookId}/comments`) : [], [notebookId])
   const refreshComments = async () => { const records = await loadComments(); if (currentNotebook.current === notebookId) setComments(records) }
   useEffect(() => { let stale = false; setComments([]); void loadComments().then(c => { if (!stale) setComments(c) }).catch(e => { if (!stale) setError(String(e)) }); return () => { stale = true } }, [loadComments, revision])
@@ -52,7 +65,13 @@ export function Workspace({ notebookId, cells, selectedCell, showActivity, revis
   async function run(fn: () => Promise<void>) {
     if (locked.current) return
     locked.current = true; setBusy(true); setError('')
-    try { await fn() } catch (e) { setError(String(e)) } finally { locked.current = false; setBusy(false); setPending(!!pendingMutation()) }
+    try {
+      if (project && notebookId && project.data.notebooks.some(n => n.notebook_id === notebookId && n.present)) {
+        const latest = await all<Project>('/projects'); setProjects(latest)
+        if (!latest.some(p => p.id === project.id && p.data.notebooks.some(n => n.notebook_id === notebookId && n.present))) throw new Error('Project membership changed. Refresh the project context before making changes.')
+      }
+      await fn()
+    } catch (e) { setError(String(e)) } finally { locked.current = false; setBusy(false); setPending(!!pendingMutation()) }
   }
   const member = project?.data.notebooks.some(n => n.notebook_id === notebookId && n.present)
   const blankTask = (): Task => ({ id: crypto.randomUUID(), title: '', acceptance_criteria: [''], parent_id: null, dependencies: [], status: 'pending', explanation: null, weight: 1,
@@ -62,15 +81,12 @@ export function Workspace({ notebookId, cells, selectedCell, showActivity, revis
     if (!notebook || !await onOpenNotebook(notebook, cell ?? undefined)) return
     if (panels.mobile) { panels.setLeft(false); panels.setRight(false) }
   }
-  return <div className="workspace"><HeaderSlot><select aria-label="Project" value={project?.id ?? ''} disabled={busy} onChange={e => { if (e.target.value) void run(() => loadProject(e.target.value)); else { ++generation.current; setProject(null); setRoadmaps([]); setConversations([]); setConversationId(''); setActivities([]); localStorage.removeItem('europa.project') } }}><option value="">Select project</option>{projects.map(p => <option value={p.id} key={p.id}>{p.data.title}</option>)}</select></HeaderSlot>
-    <SidePanel side="left"><h2>Project &amp; roadmap</h2>
+  return <div className="workspace">{contextNotice && <HeaderSlot><small className="context-note">{contextNotice}</small></HeaderSlot>}<SidePanel side="left"><h2>Roadmap</h2>
+      <label>Project context <select aria-label="Project" value={project?.id ?? ''} disabled={busy} onChange={e => { setContextNotice(''); if (e.target.value) void run(() => loadProject(e.target.value)); else { ++generation.current; setProject(null); setRoadmaps([]); setConversations([]); setConversationId(''); setActivities([]); localStorage.removeItem('europa.project') } }}><option value="">Select project</option>{projects.map(p => <option value={p.id} key={p.id}>{p.data.title}</option>)}</select></label>
       {error && <p role="alert" className="alert">{error}</p>}
       {pending && <div className="alert"><p>An operation has an unknown outcome. Retry the identical operation safely; no new operation ID will be created.</p><button disabled={busy} onClick={() => void run(async () => { await retryMutation(); await refresh() })}>Retry pending operation</button></div>}
-      <button disabled={busy || pending} onClick={() => void run(async () => { const title = prompt('Project title')?.trim(); if (!title) return; const p = await change<RecordData<Project>>('/projects', 'POST', { title }); setProjects(await all<Project>('/projects')); await loadProject(p.id) })}>New project</button>
       {project && <>
         <button disabled={busy} onClick={() => void run(refresh)}>Refresh project history</button>
-        {notebookId && !member && <button disabled={busy || pending} onClick={() => void run(async () => { await change(`/projects/${project.id}/notebooks`, 'POST', { revision: project.revision, notebook_id: notebookId }); await loadProject(project.id) })}>Add open notebook to project</button>}
-        <details><summary>Project notebooks</summary>{project.data.notebooks.map(n => <button key={n.notebook_id} disabled={!n.present} onClick={() => jump(n.notebook_id)}>Open {n.notebook_id.slice(0, 8)}{!n.present ? ' (missing)' : ''}</button>)}</details>
         <button disabled={busy || pending} onClick={() => void run(async () => {
           const objective = prompt('Roadmap objective')?.trim(); if (!objective) return
           const title = prompt('First task title')?.trim(); if (!title) return

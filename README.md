@@ -112,15 +112,15 @@ Do not bind Europa to a public or LAN address. It has no end-user authentication
 
 ## Try a notebook
 
-1. Select **New notebook** and enter a title.
-2. Select **+ Code**.
+1. Open **Notebooks** and select **New notebook**; enter a title.
+2. In the notebook editor, add a code cell using the notebook toolbar.
 3. Enter:
 
    ```python
    print("Hello, Europa!")
    ```
 
-4. Press **Shift+Enter** or select **Run**.
+4. Press **Shift+Enter** or select **Run selected cell**.
 5. Confirm that `Hello, Europa!` appears below the cell.
 6. Reload the page to verify that the notebook and saved output persist.
 
@@ -131,6 +131,15 @@ Useful editor shortcuts:
 | Save | Cmd/Ctrl+S |
 | Save and run a code cell | Shift+Enter |
 | Leave the editor | Escape |
+| Focus the selected cell (command mode) | Enter |
+| Add a code cell above/below (command mode) | A / B |
+| Copy/paste a cell within Europa (command mode) | C / V |
+| Change selected cell to Markdown/code (command mode) | M / Y |
+
+The **Projects** and **Notebooks** navigation links open separate browser views.
+Project overviews show notebook membership; roadmap and discussion are optional
+contextual panels in the notebook editor. Saved outputs do not restore live
+Python variables after a runtime restart.
 
 ## Development workflow
 
@@ -251,6 +260,7 @@ Containerd tests require approved Linux infrastructure and explicit
 
 - [Release notes](RELEASE_NOTES.md)
 - [Owner notebook UI](docs/phase3e-ui.md)
+- [Phase 3F-B navigation validation](docs/phase3f-b-validation.md)
 - [Notebook persistence](docs/notebook-persistence.md)
 - [Projects and conversations](docs/conversational-notebooks.md)
 - [Runtime architecture](docs/runtime-provider.md)
