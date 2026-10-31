@@ -21,4 +21,6 @@
 .browser-list li > a:first-child, .browser-list li > span:first-child { margin-right: auto; font-weight: 600; }
 .browser-list li > span:not(:first-child), .browser-list li > a:not(:first-child) { color: var(--muted, #64748b); font-size: .9rem; }
 .browser-list li > a:not(:first-child):hover { color: var(--accent, #2563eb); }
+.activity-page > .muted { margin-top: -.8rem; } .activity-page section[aria-label="Project activity"] > .muted { padding: 1rem 0; border-top: 1px solid var(--line); }
+#overview { padding: .8rem 1rem; border-left: 3px solid var(--accent); background: var(--surface); } #overview h2 { margin-top: 0; } #project-notebooks, #project-roadmap, #project-conversations, #project-activity { padding-top: .2rem; border-top: 1px solid var(--line); }
 @media (max-width: 600px) { .navigation-bar strong { width: 100%; } .browser-list li { align-items: baseline; } }

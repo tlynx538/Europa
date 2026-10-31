@@ -17,6 +17,11 @@ async function panel(page: Page, name: 'Roadmap' | 'Discussion') {
   if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click()
   await expect(toggle).toHaveAttribute('aria-expanded', 'true')
 }
+async function disableAutosave(page: Page) {
+  await page.locator('.appbar-more').filter({ has: page.locator('summary', { hasText: 'View' }) }).locator('summary').click()
+  await page.getByLabel('Autosave', { exact: true }).uncheck()
+  await page.keyboard.press('Escape')
+}
 async function post(request: APIRequestContext, path: string, body: object) {
   const response = await request.post(`${api}${path}`, { data: { operation_id: crypto.randomUUID(), ...body } }); expect([200, 201, 202]).toContain(response.status()); return response.json()
 }
@@ -35,6 +40,7 @@ test('owner workflow, task editing, threads, anchors and refresh persistence', a
   const roadmapAnswers = ['Investigate results', 'Inspect output', 'Owner verifies output']
   const dialogs = async (dialog: import('@playwright/test').Dialog) => { await dialog.accept(roadmapAnswers.shift() ?? '') }
   page.on('dialog', dialogs)
+  await page.locator('#roadmap .project-settings > summary').click()
   await page.getByRole('button', { name: 'Create roadmap' }).click()
   await expect(page.getByText('Investigate results', { exact: true })).toBeVisible()
   page.off('dialog', dialogs)
@@ -87,7 +93,7 @@ test('revision conflict and browser refresh preserve drafts for explicit review'
   const { id, doc } = await seed(request, 'Conflict notebook', 'original')
   const cell = doc.cells[0].id
   await open(page, id)
-  await page.getByLabel('Autosave', { exact: true }).uncheck()
+  await disableAutosave(page)
   await page.locator('.cm-content').click(); await page.keyboard.press('ControlOrMeta+A'); await page.keyboard.insertText('local draft')
   expect((await request.patch(`${api}/notebooks/${id}/cells/${cell}`, { data: { revision: 2, source: 'server change' } })).status()).toBe(200)
   await page.locator('.cell-actions summary').first().click(); await page.getByRole('button', { name: 'Save cell' }).click()
@@ -169,7 +175,7 @@ test('linked notebook navigation keeps drafts and drawer on cancellation, then t
   await open(page, first.id)
   await panel(page, 'Roadmap')
   await expect(page.getByLabel('Project', { exact: true })).toHaveValue(project.id)
-  await page.getByLabel('Autosave', { exact: true }).uncheck()
+  await disableAutosave(page)
   const editor = page.locator('.cm-content')
   await editor.click(); await editor.press('ControlOrMeta+A'); await page.keyboard.insertText('unsaved local draft')
   await page.setViewportSize({ width: 390, height: 844 })
@@ -180,12 +186,16 @@ test('linked notebook navigation keeps drafts and drawer on cancellation, then t
   await page.getByRole('button', { name: /Linked task/ }).click()
   await expect(page.getByRole('dialog', { name: 'Project and roadmap' })).toBeVisible()
   await expect(page).toHaveURL(new RegExp(`/notebooks/${first.id}$`))
+  await expect(page.getByRole('alert')).toContainText('Notebook switch cancelled or failed')
   await page.getByRole('button', { name: 'Close roadmap' }).click()
   await expect(editor).toContainText('unsaved local draft')
   await page.getByRole('button', { name: 'Roadmap', exact: true }).click()
-  page.once('dialog', dialog => dialog.accept())
+  const confirmations: string[] = []
+  page.on('dialog', dialog => { confirmations.push(dialog.message()); void dialog.accept() })
   await page.getByRole('button', { name: /Linked task/ }).click()
   await expect(page).toHaveURL(new RegExp(`/notebooks/${second.id}$`))
+  expect(confirmations).toHaveLength(1)
+  expect(confirmations[0]).toContain('Keep drafts in this browser and switch notebooks?')
   await expect(page.locator(`#cell-${second.doc.cells[0].id}`)).toHaveClass(/selected/)
   await expect(page.getByRole('dialog', { name: 'Project and roadmap' })).not.toBeVisible()
   expect(await page.evaluate(id => localStorage.getItem(`europa.drafts.${id}`), first.id)).toContain('unsaved local draft')

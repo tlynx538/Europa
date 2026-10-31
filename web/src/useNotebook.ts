@@ -61,7 +61,7 @@ export function useNotebook() {
   }
   const open = (notebook: string, discard = false): Promise<Notebook | null> => {
     if (!discard && opening.current?.id === notebook) return opening.current.promise
-    if (locked.current) { setError('Notebook operation in progress. Wait for its receipt or save to settle before switching.'); return Promise.resolve(null) }
+    if (locked.current || active) { setError('Notebook operation in progress. Wait for its receipt or save to settle before switching.'); return Promise.resolve(null) }
     const promise = openOnce(notebook, discard)
     opening.current = { id: notebook, promise }
     void promise.finally(() => { if (opening.current?.promise === promise) opening.current = null })

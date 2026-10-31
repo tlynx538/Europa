@@ -143,10 +143,11 @@ export function NotebookLibrary({ navigate, currentNotebookId, onNotebookDeleted
 
 export function ActivityPage({ navigate }: BrowserProps) {
   const [projects, setProjects] = useState<RecordData<Project>[]>([]), [selected, setSelected] = useState(''), [activities, setActivities] = useState<RecordData<Activity>[]>([]), [error, setError] = useState('')
+  const [loaded, setLoaded] = useState(false)
   useEffect(() => { let live = true; void all<Project>('/projects').then(p => { if (live) setProjects(p) }).catch(e => { if (live) setError(String(e)) }); return () => { live = false } }, [])
-  useEffect(() => { let live = true; setActivities([]); if (selected) void all<Activity>(`${projectUrl(selected)}/activities`).then(a => { if (live) setActivities(a) }).catch(e => { if (live) setError(String(e)) }); return () => { live = false } }, [selected])
-  return <main className="browser-page"><h1>Activity</h1>{error && <p role="alert" className="alert">{error}</p>}
+  useEffect(() => { let live = true; setActivities([]); setLoaded(false); if (selected) void all<Activity>(`${projectUrl(selected)}/activities`).then(a => { if (live) { setActivities(a); setLoaded(true) } }).catch(e => { if (live) setError(String(e)) }); return () => { live = false } }, [selected])
+  return <main className="browser-page activity-page"><h1>Activity</h1><p className="muted">Owner-recorded project history; execution results remain in notebook receipts.</p>{error && <p role="alert" className="alert">{error}</p>}
     <label>Project <select value={selected} onChange={e => setSelected(e.target.value)}><option value="">Select a project</option>{projects.map(p => <option key={p.id} value={p.id}>{p.data.title}</option>)}</select></label>
-    {!selected ? <p>Select a project to see its activity.</p> : <ul className="browser-list">{activities.map(a => <li key={a.id}><span>{a.data.summary} · {a.data.result}</span>{a.data.notebook_id && <button onClick={() => void navigate(notebookUrl(a.data.notebook_id!))}>Open notebook</button>}</li>)}</ul>}
+    {!selected ? <p>Select a project to see its activity.</p> : <section aria-label="Project activity">{loaded && activities.length === 0 && <p className="muted">No activity recorded for this project.</p>}<ul className="browser-list">{activities.map(a => <li key={a.id}><span><strong>{a.data.summary}</strong> · {a.data.result}</span>{a.data.notebook_id && <button onClick={() => void navigate(notebookUrl(a.data.notebook_id!))}>Open notebook</button>}</li>)}</ul></section>}
   </main>
 }

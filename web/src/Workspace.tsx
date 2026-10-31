@@ -82,20 +82,12 @@ export function Workspace({ notebookId, cells, selectedCell, showActivity, revis
     if (panels.mobile) { panels.setLeft(false); panels.setRight(false) }
   }
   return <div className="workspace">{contextNotice && <HeaderSlot><small className="context-note">{contextNotice}</small></HeaderSlot>}<SidePanel side="left"><h2>Roadmap</h2>
-      <label>Project context <select aria-label="Project" value={project?.id ?? ''} disabled={busy} onChange={e => { setContextNotice(''); if (e.target.value) void run(() => loadProject(e.target.value)); else { ++generation.current; setProject(null); setRoadmaps([]); setConversations([]); setConversationId(''); setActivities([]); localStorage.removeItem('europa.project') } }}><option value="">Select project</option>{projects.map(p => <option value={p.id} key={p.id}>{p.data.title}</option>)}</select></label>
       {error && <p role="alert" className="alert">{error}</p>}
       {pending && <div className="alert"><p>An operation has an unknown outcome. Retry the identical operation safely; no new operation ID will be created.</p><button disabled={busy} onClick={() => void run(async () => { await retryMutation(); await refresh() })}>Retry pending operation</button></div>}
+      {!project && <p className="muted roadmap-empty">Select a project in Project settings to view its roadmap.</p>}
       {project && <>
-        <button disabled={busy} onClick={() => void run(refresh)}>Refresh project history</button>
-        <button disabled={busy || pending} onClick={() => void run(async () => {
-          const objective = prompt('Roadmap objective')?.trim(); if (!objective) return
-          const title = prompt('First task title')?.trim(); if (!title) return
-          const criterion = prompt('Acceptance criterion')?.trim(); if (!criterion) return
-          await change('/roadmaps', 'POST', { project_id: project.id, ...(member ? { notebook_id: notebookId } : {}), objective, tasks: [{ ...blankTask(), title, acceptance_criteria: [criterion] }] }); await loadProject(project.id)
-        })}>Create roadmap</button>
+        {roadmaps.length === 0 && <p className="muted roadmap-empty">No roadmap for this project yet.</p>}
         {roadmaps.map(r => <section className="roadmap" key={r.id}><h3>{r.data.objective}</h3><div className="progress-label"><span>{r.data.overall_display?.label ?? 'Overall progress'}</span><span>{r.data.progress}%</span></div><progress aria-label="Overall project progress" max="100" value={r.data.progress} />
-          <button disabled={busy || pending} onClick={() => { setEditing({ roadmap: r, task: blankTask(), newTask: true }) }}>Add task</button>
-          <button disabled={busy || pending} onClick={() => void run(async () => { const objective = prompt('Roadmap objective', r.data.objective)?.trim(); if (!objective) return; await change(`/roadmaps/${r.id}`, 'PUT', { revision: r.revision, objective, tasks: r.data.tasks.map(rawTask) }); await loadProject(project.id) })}>Edit objective</button>
           <h3>Tasks</h3><ol>{r.data.tasks.map((task, index) => <li className={`task ${task.display.compact ? 'compact' : ''}`} key={task.id}>
             <button onClick={() => { setTaskFilter(task.id); jump(task.links.notebook_id, task.links.cell_id) }}>{task.display.checkmark ? '✓ ' : ''}{task.title} · {task.status.replace('_', ' ')}</button>
             {task.display.show_progress && <><span>{task.progress}%</span><progress aria-label={`${task.title} progress`} max="100" value={task.progress} /></>}
@@ -105,8 +97,21 @@ export function Workspace({ notebookId, cells, selectedCell, showActivity, revis
               <button disabled={busy || pending || index === 0} onClick={() => void run(async () => { const tasks = r.data.tasks.map(rawTask); [tasks[index - 1], tasks[index]] = [tasks[index], tasks[index - 1]]; await change(`/roadmaps/${r.id}`, 'PUT', { revision: r.revision, objective: r.data.objective, tasks }); await loadProject(project.id) })}>Move task up</button>
               <button disabled={busy || pending} onClick={() => { if (confirm('Remove task from the current plan? Historical versions are retained.')) void run(async () => { await change(`/roadmaps/${r.id}`, 'PUT', { revision: r.revision, objective: r.data.objective, tasks: r.data.tasks.filter(t => t.id !== task.id).map(rawTask) }); await loadProject(project.id) }) }}>Remove task</button>
             </details>
-          </li>)}</ol>
+          </li>)}</ol><div className="roadmap-actions"><button disabled={busy || pending} onClick={() => { setEditing({ roadmap: r, task: blankTask(), newTask: true }) }}>Add task</button>
+          <button disabled={busy || pending} onClick={() => void run(async () => { const objective = prompt('Roadmap objective', r.data.objective)?.trim(); if (!objective) return; await change(`/roadmaps/${r.id}`, 'PUT', { revision: r.revision, objective, tasks: r.data.tasks.map(rawTask) }); await loadProject(project.id) })}>Edit objective</button></div>
         </section>)}
+      </>}
+      <details className="project-settings" key={`${project?.id ?? 'none'}-${roadmaps.length}`}><summary>Project settings</summary>
+        <label>Project context <select aria-label="Project" value={project?.id ?? ''} disabled={busy} onChange={e => { setContextNotice(''); if (e.target.value) void run(() => loadProject(e.target.value)); else { ++generation.current; setProject(null); setRoadmaps([]); setConversations([]); setConversationId(''); setActivities([]); localStorage.removeItem('europa.project') } }}><option value="">Select project</option>{projects.map(p => <option value={p.id} key={p.id}>{p.data.title}</option>)}</select></label>
+        {project && <><button disabled={busy} onClick={() => void run(refresh)}>Refresh project history</button>
+        <button disabled={busy || pending} onClick={() => void run(async () => {
+          const objective = prompt('Roadmap objective')?.trim(); if (!objective) return
+          const title = prompt('First task title')?.trim(); if (!title) return
+          const criterion = prompt('Acceptance criterion')?.trim(); if (!criterion) return
+          await change('/roadmaps', 'POST', { project_id: project.id, ...(member ? { notebook_id: notebookId } : {}), objective, tasks: [{ ...blankTask(), title, acceptance_criteria: [criterion] }] }); await loadProject(project.id)
+        })}>Create roadmap</button></>}
+      </details>
+      {project && <>
         {(showActivity || taskFilter) && <section className="activity-zone"><h3>Contextual activity</h3>{taskFilter && <button onClick={() => setTaskFilter(null)}>Clear task filter</button>}
           {activities.filter(a => taskFilter ? a.data.task_id === taskFilter : a.data.notebook_id === notebookId && (!a.data.cell_id || a.data.cell_id === selectedCell)).map(a => <p key={a.id}><button onClick={() => jump(a.data.notebook_id, a.data.cell_id)}>{a.data.summary}</button> · {a.data.result}</p>)}
           <button disabled={busy || pending} onClick={() => void run(async () => { const summary = prompt('Owner activity summary')?.trim(); if (!summary) return; await change(`/projects/${project.id}/activities`, 'POST', { project_id: project.id, summary, ...(member ? { notebook_id: notebookId, cell_id: selectedCell } : {}), ...(taskFilter ? { task_id: taskFilter } : {}) }); await loadProject(project.id) })}>Record owner activity</button>

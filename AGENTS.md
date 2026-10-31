@@ -52,3 +52,11 @@ integration tests as successful validation.
 
 For documentation-only changes, inspect the final diff; application tests are
 usually unnecessary. Report what changed and any checks performed or limitations.
+
+## Agent workflow and project lessons
+
+Read [docs/agent-workflow.md](docs/agent-workflow.md) when delegating, resuming
+interrupted work, or validating a milestone. Keep reusable Europa-specific
+prompts in `docs/agent-prompts/`. Record evidence and limitations with each lesson;
+do not turn unverified diagnoses into project rules. General agent instructions
+and resource limits belong in the shared OpenCode setup, not application code.

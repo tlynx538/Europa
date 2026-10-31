@@ -16,6 +16,44 @@ describe('revision-aware notebook controller', () => {
     const hook = renderHook(useNotebook)
     await act(async () => { const first = hook.result.current.open('nb'); const second = hook.result.current.open('nb'); expect(opens).toBe(1); expect(await first).not.toBeNull(); expect(await second).not.toBeNull() })
   })
+  it('keeps a notebook with a pending receipt until authoritative history settles it', async () => {
+    vi.useFakeTimers()
+    const pending = { execution_id: 'pending', notebook_id: 'nb', cell_id: 'cell', state: 'running' }
+    let history = [pending]
+    const fetched: string[] = []
+    const confirmSwitch = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirmSwitch)
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      fetched.push(url)
+      const body = url.endsWith('/execute') ? pending
+        : url.includes('/executions?') ? { items: history, next_offset: null }
+        : url.endsWith('/session') ? { state: 'connected', kernels: 1 }
+        : url === '/api/notebooks/other' ? { ...document(), metadata: { europa: { notebook_id: 'other', title: 'Other', revision: 1 } } }
+        : document()
+      return new Response(JSON.stringify(body))
+    }))
+    const hook = renderHook(useNotebook)
+    await act(() => hook.result.current.open('nb'))
+    await act(() => hook.result.current.execute('cell'))
+    expect(hook.result.current.busy).toBe(false)
+    expect(hook.result.current.active).toBe(true)
+    act(() => { hook.result.current.setAutosave(false); hook.result.current.edit('cell', 'keep this draft') })
+    await act(async () => { expect(await hook.result.current.open('other')).toBeNull() })
+    expect(hook.result.current.doc?.metadata.europa.notebook_id).toBe('nb')
+    expect(hook.result.current.receipts).toEqual([pending])
+    expect(hook.result.current.drafts.cell).toBe('keep this draft')
+    expect(fetched).not.toContain('/api/notebooks/other')
+    expect(confirmSwitch).not.toHaveBeenCalled()
+
+    history = [{ ...pending, state: 'applied' }]
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500) })
+    expect(hook.result.current.active).toBe(false)
+    expect(hook.result.current.receipts).toEqual(history)
+    await act(() => hook.result.current.open('other'))
+    expect(confirmSwitch).toHaveBeenCalledTimes(1)
+    expect(fetched).toContain('/api/notebooks/other')
+    expect(hook.result.current.doc?.metadata.europa.notebook_id).toBe('other')
+  })
   it('closes the editor without deleting a recoverable draft', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => new Response(JSON.stringify(url.includes('/executions?') ? { items: [], next_offset: null } : url.endsWith('/session') ? { state: 'disconnected', kernels: 0 } : document()))))
     const hook = renderHook(useNotebook)
