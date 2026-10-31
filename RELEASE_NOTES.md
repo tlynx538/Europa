@@ -6,8 +6,18 @@ Detailed implementation contracts and validation evidence remain in `docs/`.
 
 ## Unreleased
 
-Record future user-visible changes here rather than adding milestone history to
-the README. Move entries into a named release section when they are published.
+- Jupyter-style notebook spacing, input/result gutters, compact icon toolbar, and
+  distinct command/edit selection.
+- Fixed full-width notebook header and status footer, with project/notebook
+  navigation and guarded Open/Close commands in File.
+- Keyboard-accessible compact menus, theme submenu and shortcut dialog.
+- Task-focused roadmap, compact discussion with readable cell references, and
+  separated notebook/project row actions.
+- Project settings in File, presented in a modal over a dark blurred backdrop.
+- Persisted project Activity timeline with timestamps and useful empty navigation.
+
+See [Phase 3G validation](docs/phase3g-validation.md) for candidate status,
+reference comparisons, checks and limitations.
 
 ## Phase 3E — Owner-facing notebook UI
 

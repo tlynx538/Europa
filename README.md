@@ -262,6 +262,7 @@ Containerd tests require approved Linux infrastructure and explicit
 - [Owner notebook UI](docs/phase3e-ui.md)
 - [Phase 3F-B navigation validation](docs/phase3f-b-validation.md)
 - [Phase 3F-D UI recovery validation](docs/phase3f-d-validation.md)
+- [Phase 3G notebook UX validation](docs/phase3g-validation.md)
 - [Notebook persistence](docs/notebook-persistence.md)
 - [Projects and conversations](docs/conversational-notebooks.md)
 - [Runtime architecture](docs/runtime-provider.md)

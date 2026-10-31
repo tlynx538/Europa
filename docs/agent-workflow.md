@@ -100,3 +100,35 @@ paths, temporary ports or speculative crash causes as permanent rules.
 For Phase 3F-D, use [the P0 audit brief](agent-prompts/phase3fd-p0-audit.md).
 The milestone remains incomplete until its required checks and deliverables pass;
 do not begin Phase 4 or migrate the frontend.
+
+For Phase 3G, follow the [approved brief](agent-prompts/phase3g-brief.md) and
+[current design decisions](phase3g-design.md), including subsequent user feedback.
+The latest direction requires full-width fixed notebook chrome, a global bottom
+status bar, proper menu rows and guarded File navigation. It supersedes earlier
+status docking choices. Read known file paths directly; do not spend repeated
+glob calls rediscovering named files. A worker that exhausts investigation without
+a handoff is not a successful design review. Prefer explicit source/evidence
+questions and require a conclusion before more discovery.
+
+When changing menu primitives, update tests to the resulting accessible roles,
+including checkbox/radio state and submenu dismissal. A selection may close a
+menu automatically; an old toggle click can reopen it. Preserve each test's
+behavioral assertion instead of retaining obsolete disclosure selectors.
+
+After responsive resizing, wait on the actual header/footer/editor geometry
+when ResizeObserver measurements determine the scroll viewport. Use bounded
+condition polling. An immediate snapshot can describe the previous frame;
+fixed delays and forced clicks do not establish usable layout or focus.
+
+Give each corrective test run a distinct log/exit filename and record its exact
+scope. A passing single-case repair is not a complete-suite pass. Preserve failed
+evidence instead of overwriting it with the latest output.
+
+Keep automated frontend checks serialized, including diagnostic unit runs. Europa's
+`npm test` script already selects `src`; appending another path does not narrow
+that selection. For one file use `npx vitest run src/Example.test.tsx --maxWorkers=1`;
+for the full unit suite use `npm test -- --maxWorkers=1`.
+
+Workspace loads project choices before selected-project metadata. A project name
+in an option does not establish readiness; wait for the selected membership or
+metadata that the test actually asserts.

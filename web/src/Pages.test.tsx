@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { NotebookLibrary, ProjectDetail, ProjectsPage } from './Pages'
+import { ActivityPage, NotebookLibrary, ProjectDetail, ProjectsPage } from './Pages'
 
 afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
@@ -23,7 +23,8 @@ it('requires confirmation before deleting a saved notebook', async () => {
   vi.stubGlobal('confirm', () => false)
   render(<NotebookLibrary navigate={async () => true} />)
   await screen.findByRole('link', { name: 'Research' })
-  fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+  fireEvent.keyDown(screen.getByRole('button', { name: 'Actions for Research' }), { key: 'ArrowDown' })
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }))
   await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2))
 })
 
@@ -34,7 +35,8 @@ it('allows deletion of the previously selected notebook from the library and cle
   vi.stubGlobal('fetch', fetcher)
   vi.stubGlobal('confirm', () => true)
   render(<NotebookLibrary currentNotebookId="one" onNotebookDeleted={removed} navigate={async () => true} />)
-  fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+  fireEvent.keyDown(await screen.findByRole('button', { name: 'Actions for Research' }), { key: 'ArrowDown' })
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }))
   await waitFor(() => expect(removed).toHaveBeenCalledWith('one'))
   expect(localStorage.getItem('europa.notebook')).toBeNull()
   expect(fetcher.mock.calls.some(([url, init]) => url.includes('/notebooks/one?revision=3') && init?.method === 'DELETE')).toBe(true)
@@ -44,8 +46,9 @@ it('blocks deletion while the notebook has recoverable browser drafts', async ()
   localStorage.setItem('europa.drafts.one', JSON.stringify({ revision: 3, drafts: { cell: 'unsaved' } }))
   vi.stubGlobal('fetch', async (url: string) => new Response(JSON.stringify(url.includes('/projects?') ? { items: [], next_cursor: null } : [{ notebook_id: 'one', title: 'Research', revision: 3 }])))
   render(<NotebookLibrary currentNotebookId="one" navigate={async () => true} />)
-  const button = await screen.findByRole('button', { name: 'Delete' })
-  expect(button.hasAttribute('disabled')).toBe(true)
+  fireEvent.keyDown(await screen.findByRole('button', { name: 'Actions for Research' }), { key: 'ArrowDown' })
+  const button = await screen.findByRole('menuitem', { name: 'Delete' })
+  expect(button.getAttribute('data-disabled')).not.toBeNull()
   expect(button.getAttribute('title')).toMatch(/drafts/i)
 })
 
@@ -102,20 +105,52 @@ it('distinguishes an empty notebook library from search with no matches', async 
 
 it('shows server roadmap, conversation and activity in project sections', async () => {
   vi.stubGlobal('fetch', async (url: string) => new Response(JSON.stringify(url.endsWith('/projects/one') ? { id: 'one', revision: 1, data: { title: 'One', status: 'active', notebooks: [] } }
-    : url.endsWith('/notebooks') ? [] : { items: url.includes('/roadmaps?') ? [{ id: 'r', data: { objective: 'Ship', progress: 50, tasks: [] } }] : url.includes('/conversations?') ? [{ id: 'c', data: { title: 'Planning' } }] : url.includes('/activities?') ? [{ id: 'a', data: { summary: 'Reviewed', result: 'done' } }] : [], next_cursor: null })))
+    : url.endsWith('/notebooks') ? [] : { items: url.includes('/roadmaps?') ? [{ id: 'r', data: { objective: 'Ship', progress: 50, tasks: [] } }] : url.includes('/conversations?') ? [{ id: 'c', data: { title: 'Planning' } }] : url.includes('/activities?') ? [{ id: 'a', created_at: 1700000000, data: { summary: 'Reviewed', result: 'done' } }] : [], next_cursor: null })))
   render(<ProjectDetail id="one" navigate={async () => true} />)
   expect(await screen.findByText(/Ship · 50%/)).toBeTruthy()
   expect(screen.getByText('Planning')).toBeTruthy()
-  expect(screen.getByText(/Reviewed · done/)).toBeTruthy()
+  expect(screen.getByText('Reviewed')).toBeTruthy()
+  expect(screen.getByText('done')).toBeTruthy()
 })
 
 it('does not expose project mutations for deleted projects', async () => {
   vi.stubGlobal('fetch', async (url: string) => new Response(JSON.stringify(url.endsWith('/projects/one') ? { id: 'one', revision: 1, data: { title: 'One', status: 'deleted', notebooks: [] } } : url.endsWith('/notebooks') ? [] : { items: [], next_cursor: null })))
   render(<ProjectDetail id="one" navigate={async () => true} />)
   expect(await screen.findByRole('heading', { name: 'One' })).toBeTruthy()
-  expect(screen.getByRole('button', { name: 'Rename project' }).hasAttribute('disabled')).toBe(true)
-  expect(screen.queryByRole('button', { name: 'Delete project' })).toBeNull()
+  fireEvent.keyDown(screen.getByRole('button', { name: 'Project actions' }), { key: 'ArrowDown' })
+  expect(screen.getByRole('menuitem', { name: 'Rename project' }).getAttribute('data-disabled')).not.toBeNull()
+  expect(screen.queryByRole('menuitem', { name: 'Delete project' })).toBeNull()
   expect(screen.queryByRole('button', { name: 'New notebook in project' })).toBeNull()
+})
+
+it('shows dated persisted activity in descending order with notebook and task references', async () => {
+  const navigate = vi.fn(async () => true)
+  vi.stubGlobal('fetch', async (url: string) => new Response(JSON.stringify(url.endsWith('/notebooks') ? [{ notebook_id: 'book', title: 'Observations', revision: 1 }] : {
+    items: url.includes('/activities?') ? [
+      { id: 'older', created_at: 1700000000, data: { summary: 'Started review', result: 'recorded' } },
+      { id: 'newer', created_at: 1700000100, data: { summary: 'Checked results', result: 'completed', notebook_id: 'book', cell_id: 'cell-id', task_id: 'task' } },
+    ] : url.includes('/roadmaps?') ? [{ id: 'plan', data: { tasks: [{ id: 'task', title: 'Review results' }] } }] : [{ id: 'project', data: { title: 'Research', notebooks: [] } }], next_cursor: null,
+  })))
+  render(<ActivityPage navigate={navigate} />)
+  fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'project' } })
+  const titles = await screen.findAllByText(/Checked results|Started review/)
+  expect(titles.map(t => t.textContent)).toEqual(['Checked results', 'Started review'])
+  expect(screen.getByText('Task: Review results')).toBeTruthy()
+  expect(screen.getByText('Cell reference: cell-id')).toBeTruthy()
+  expect(document.querySelector('time')?.getAttribute('datetime')).toBe(new Date(1700000100 * 1000).toISOString())
+  fireEvent.click(screen.getByRole('link', { name: 'Observations' }))
+  expect(navigate).toHaveBeenCalledWith('/notebooks/book')
+})
+
+it('offers project navigation for empty activity without a timeline', async () => {
+  const navigate = vi.fn(async () => true)
+  vi.stubGlobal('fetch', async (url: string) => new Response(JSON.stringify(url.endsWith('/notebooks') ? [] : { items: url.includes('/projects?') ? [{ id: 'project', data: { title: 'Research' } }] : [], next_cursor: null })))
+  render(<ActivityPage navigate={navigate} />)
+  fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'project' } })
+  expect(await screen.findByText(/No activity recorded for this project/)).toBeTruthy()
+  expect(screen.queryByRole('list')).toBeNull()
+  fireEvent.click(screen.getByRole('link', { name: 'Open project' }))
+  expect(navigate).toHaveBeenCalledWith('/projects/project')
 })
 
 it('creates a notebook then associates it using the project revision before opening it', async () => {
