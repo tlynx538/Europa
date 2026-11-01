@@ -21,6 +21,10 @@ async function projectPost(request: APIRequestContext, path: string, data: objec
 async function add(request: APIRequestContext, id: string, revision: number, cell_type: 'code' | 'markdown', source: string) {
   return post(request, `/notebooks/${id}/cells`, { revision, cell_type, source })
 }
+async function toggleRoadmap(page: Page) {
+  await page.getByRole('menubar').getByRole('menuitem', { name: 'View' }).click()
+  await page.getByRole('menuitemcheckbox', { name: 'Roadmap panel' }).click()
+}
 async function ready(page: Page) {
   await expect(page.locator('footer.status')).toContainText('API: connected')
   await expect(page.locator('footer.status')).toContainText('Document saved')
@@ -35,6 +39,7 @@ async function settled(page: Page, request: APIRequestContext, id: string, cellI
     return `${receipt.state}:${receipt.result?.status}`
   }, { timeout: 45000 }).toBe(`applied:${status}`)
   await expect(page.locator(`#cell-${cellId}`)).toContainText(`Execution: applied (${status})`, { timeout: 45000 })
+  await expect(page.locator(`#cell-${cellId}`).getByLabel(/Execution history for cell/)).toBeVisible()
   await ready(page) // An applied receipt alone does not imply the UI operation lock is released.
   await page.locator(`#cell-${cellId}`).focus()
   await expect(toolbar(page).getByRole('button', { name: 'Run selected cell' })).toBeEnabled()
@@ -117,7 +122,9 @@ test('real execution visual baseline: notebook, MIME outputs, panels, menus and 
   const project = await projectPost(request, '/projects', { title: 'Phase 3G visual project' })
   await projectPost(request, `/projects/${project.id}/notebooks`, { revision: 1, notebook_id: id })
   await projectPost(request, '/roadmaps', { project_id: project.id, objective: 'Review weekly observations', tasks: [{ id: 'review', title: 'Review results', acceptance_criteria: ['Inspect the notebook'] }] })
-  const conversation = await projectPost(request, '/conversations', { project_id: project.id })
+  const canonicalResponse = await request.get(`${api}/notebooks/${id}/conversation`)
+  expect(canonicalResponse.status()).toBe(200)
+  const conversation = await canonicalResponse.json()
   await projectPost(request, `/conversations/${conversation.id}/messages`, { content: 'Review the weekly chart and table.' })
   await page.goto(`/notebooks/${id}`)
   await expect(page.locator('.cell')).toHaveCount(5)
@@ -206,15 +213,14 @@ test('real execution visual baseline: notebook, MIME outputs, panels, menus and 
   await capture(page, info, 'overview-1280x800', `#cell-${ids[0]}`)
   await capture(page, info, 'overview-full-page-1280x800', undefined, true)
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.getByRole('button', { name: 'Roadmap', exact: true }).click()
+  await toggleRoadmap(page)
   await expect(page.getByText('Review weekly observations', { exact: true })).toBeVisible()
   await capture(page, info, 'roadmap-1440x900')
-  await page.getByRole('button', { name: 'Discussion', exact: true }).click()
+  await page.getByLabel('Message', { exact: true }).focus()
   await expect(page.getByText('Review the weekly chart and table.')).toBeVisible()
-  await capture(page, info, 'both-panels-1440x900')
-  await page.getByRole('button', { name: 'Roadmap', exact: true }).click()
-  await capture(page, info, 'discussion-1440x900')
-  await page.getByRole('button', { name: 'Discussion', exact: true }).click()
+  await capture(page, info, 'mixed-stream-roadmap-1440x900')
+  await toggleRoadmap(page)
+  await capture(page, info, 'mixed-stream-1440x900')
   const desktopChrome = await page.evaluate(() => ({ width: innerWidth, height: innerHeight, header: document.querySelector('.appbar')!.getBoundingClientRect().toJSON(), footer: document.querySelector('footer.status')!.getBoundingClientRect().toJSON(), title: document.querySelector('.notebook-chrome-title')!.getBoundingClientRect().toJSON(), heading: document.querySelector('.notebook-chrome-title h1')!.getBoundingClientRect().toJSON(), links: document.querySelectorAll('.notebook-chrome-title a').length }))
   expect(desktopChrome.links).toBe(0)
   expect(desktopChrome.heading.left).toBe(desktopChrome.title.left)
@@ -251,57 +257,36 @@ test('real execution visual baseline: notebook, MIME outputs, panels, menus and 
   expect(chrome.footer.bottom).toBe(chrome.height)
   expect(chrome.editor.bottom).toBeLessThanOrEqual(chrome.footer.top)
   await capture(page, info, 'notebook-390x844')
-  await page.getByRole('button', { name: 'Roadmap', exact: true }).click()
+  await toggleRoadmap(page)
   await expect(page.getByRole('dialog', { name: 'Project and roadmap' })).toBeVisible()
   await capture(page, info, 'roadmap-drawer-390x844')
   await page.keyboard.press('Escape')
-  await page.getByRole('button', { name: 'Discussion', exact: true }).click()
-  await expect(page.getByRole('dialog', { name: 'Discussion', exact: true })).toBeVisible()
-  await capture(page, info, 'discussion-drawer-390x844')
+  await page.getByLabel('Message', { exact: true }).focus()
+  await expect(page.getByLabel('Message', { exact: true })).toBeFocused()
+  await capture(page, info, 'composer-390x844')
 })
 
-test('Roadmap and Discussion toggles fit their reserved header row and remain hittable at the bottom edge', async ({ page, request }) => {
-  const created = await post(request, '/notebooks', { title: 'Panel toggle geometry' })
-  await page.goto(`/notebooks/${created.metadata.europa.notebook_id}`)
-  await ready(page)
-  const measured: object[] = []
+test('View roadmap uses one modal on mobile and composer stays above the footer', async ({ page, request }) => {
+  const created = await post(request, '/notebooks', { title: 'Panel and overlay geometry' })
   for (const width of [1440, 1280, 390]) {
-    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 })
-    const geometry = await page.evaluate(() => {
-      const rect = (selector: string) => document.querySelector(selector)!.getBoundingClientRect()
-      const menubar = rect('.notebook-menubar'), toolbar = rect('.editor-tools'), controls = rect('.appbar-controls'), header = rect('.appbar')
-      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('.appbar-controls button')).map(button => {
-        const box = button.getBoundingClientRect()
-        return { name: button.textContent, height: box.height, bottom: box.bottom, hit: document.elementFromPoint(box.left + box.width / 2, box.bottom - 2) === button }
-      })
-      return { menubar: { top: menubar.top, bottom: menubar.bottom }, toolbar: { top: toolbar.top, bottom: toolbar.bottom }, controls: { top: controls.top, bottom: controls.bottom }, headerBottom: header.bottom, buttons }
-    })
-    measured.push({ width, ...geometry })
-    expect(geometry.buttons.map(button => button.name)).toEqual(['Roadmap', 'Discussion'])
-    for (const button of geometry.buttons) {
-      expect(button.height, `width ${width}: ${button.name}`).toBeGreaterThanOrEqual(width === 390 ? 32 : 28)
-      expect(button.bottom + 2, `width ${width}: ${button.name} bottom and focus outline`).toBeLessThanOrEqual((width === 390 ? geometry.controls.bottom : geometry.menubar.bottom) + 0.5)
-      expect(button.hit, `width ${width}: ${button.name} bottom-edge hit target`).toBe(true)
-    }
+    await page.setViewportSize({ width, height: width === 390 ? 844 : width === 1280 ? 800 : 900 })
+    await page.goto(`/notebooks/${created.metadata.europa.notebook_id}`)
+    await expect(page.locator('.message-composer')).toBeVisible()
+    await expect(page.locator('.appbar-controls button')).toHaveCount(0)
+    await expect.poll(() => page.evaluate(() => {
+      const composer = document.querySelector('.composer-shell')!.getBoundingClientRect()
+      const footer = document.querySelector('.global-status')!.getBoundingClientRect()
+      return Math.round(composer.bottom - footer.top)
+    })).toBe(0)
+    await toggleRoadmap(page)
+    await expect(page.locator('#roadmap')).toBeVisible()
     if (width === 390) {
-      expect(geometry.controls.top).toBeGreaterThanOrEqual(geometry.toolbar.bottom - 0.5)
-      expect(geometry.controls.bottom + 2).toBeLessThanOrEqual(geometry.headerBottom + 0.5)
-    } else {
-      expect(geometry.controls.top).toBeGreaterThanOrEqual(geometry.menubar.top)
-      expect(geometry.menubar.bottom).toBeLessThanOrEqual(geometry.toolbar.top + 0.5)
-    }
-    for (const [name, panel] of [['Roadmap', 'roadmap'], ['Discussion', 'discussion']] as const) {
-      const toggle = page.getByRole('button', { name, exact: true })
-      await toggle.click()
-      await expect(toggle).toHaveAttribute('aria-expanded', 'true')
-      await expect(page.locator(`#${panel}`)).toBeVisible()
-      if (width === 390) await page.locator(`#${panel}`).getByRole('button', { name: `Close ${panel}` }).click()
-      else await toggle.click()
-      await expect(toggle).toHaveAttribute('aria-expanded', 'false')
-      await expect(page.locator(`#${panel}`)).toBeHidden()
-    }
+      expect(await page.locator('#roadmap').evaluate(node => node.matches(':modal'))).toBe(true)
+      await page.keyboard.press('Escape')
+      await expect(page.locator('#roadmap')).toBeHidden()
+      await expect(page.getByRole('menubar').getByRole('menuitem', { name: 'View' })).toBeFocused()
+    } else await toggleRoadmap(page)
   }
-  writeFileSync('/private/tmp/europa-phase3g/header-final-geometry.json', JSON.stringify(measured, null, 2))
 })
 
 test('File project settings is one modal with bounded mobile layout and guarded project management', async ({ page, request }, info) => {
@@ -349,14 +334,14 @@ test('File project settings is one modal with bounded mobile layout and guarded 
   await page.getByRole('menuitem', { name: 'Project settings…' }).click()
   await dialog.getByRole('button', { name: 'Close Project settings' }).click()
   await expect(file).toBeFocused()
-  await page.getByRole('button', { name: 'Roadmap', exact: true }).click()
+  await toggleRoadmap(page)
   const emptySettings = page.locator('#roadmap').getByRole('button', { name: 'Open Project settings' })
   await emptySettings.click()
   await expect(dialog).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(dialog).toBeHidden()
   await expect(emptySettings).toBeFocused()
-  await page.getByRole('button', { name: 'Roadmap', exact: true }).click()
+  await toggleRoadmap(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await file.click()
   await page.getByRole('menuitem', { name: 'Project settings…' }).click()
@@ -374,7 +359,7 @@ test('File project settings is one modal with bounded mobile layout and guarded 
   writeFileSync('/private/tmp/europa-phase3g/settings-geometry.json', JSON.stringify({ desktop: desktopGeometry, mobile: geometry }, null, 2))
   await dialog.getByRole('button', { name: 'Close Project settings' }).click()
   await expect(file).toBeFocused()
-  await page.getByRole('button', { name: 'Roadmap', exact: true }).click()
+  await toggleRoadmap(page)
   await page.locator('#roadmap').getByRole('button', { name: 'Open Project settings' }).click()
   await expect(dialog).toBeVisible()
   await expect(page.locator('#roadmap')).toBeHidden()
@@ -464,7 +449,6 @@ test('library creation through execution, markdown, reorder, save/reopen, traceb
   await page.keyboard.insertText(fixture.markdown)
   await toolbar(page).getByRole('button', { name: 'Save notebook' }).click()
   await expect(page.locator('.cell').last().locator('.markdown-preview h1')).toHaveText('Weekly observations')
-  await page.locator('.cell').last().locator('.cell-actions summary').click()
   await page.getByRole('button', { name: 'Move cell 2 up' }).click()
   await expect(page.locator('.cell').first()).toHaveAttribute('aria-label', 'markdown cell 1')
   await ready(page)
@@ -486,11 +470,11 @@ test('library creation through execution, markdown, reorder, save/reopen, traceb
   expect(errorResponse.status()).toBe(202)
   await settled(page, request, id, last, (await errorResponse.json()).execution_id, 'error')
   await expect(page.locator('.cell').last().locator('.outputs')).toContainText('ValueError: Example invalid measurement')
-  for (const name of ['Roadmap', 'Discussion'] as const) {
-    const button = page.getByRole('button', { name, exact: true })
-    await button.click(); await expect(button).toHaveAttribute('aria-expanded', 'true')
-    await button.click(); await expect(button).toHaveAttribute('aria-expanded', 'false')
-  }
+  await toggleRoadmap(page)
+  await expect(page.locator('#roadmap')).toBeVisible()
+  await toggleRoadmap(page)
+  await expect(page.locator('#roadmap')).toBeHidden()
+  await expect(page.locator('.message-composer')).toBeVisible()
   await ready(page)
   await page.getByRole('menubar').getByRole('menuitem', { name: 'File' }).click()
   await page.getByRole('menuitem', { name: 'Open notebook…' }).click()

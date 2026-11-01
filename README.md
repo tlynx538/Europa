@@ -14,6 +14,7 @@ must remain bound to loopback.
 - Durable execution receipts, reconnect recovery, and verified interruption
 - Standard Jupyter outputs, including safely rendered rich output
 - Projects, versioned roadmaps, tasks, conversations, and cell comments
+- Inline cell comment and reply editors with scoped draft recovery
 - Local development runtimes managed through Jupyter Kernel Gateway
 - Optional containerd+runc runtimes with resource admission, durable ownership,
   recovery, prewarming, and idle cleanup
@@ -136,10 +137,12 @@ Useful editor shortcuts:
 | Copy/paste a cell within Europa (command mode) | C / V |
 | Change selected cell to Markdown/code (command mode) | M / Y |
 
-The **Projects** and **Notebooks** navigation links open separate browser views.
-Project overviews show notebook membership; roadmap and discussion are optional
-contextual panels in the notebook editor. Saved outputs do not restore live
-Python variables after a runtime restart.
+Use **File → Open project** or **Open notebook** to switch workspaces. Project
+overviews show their linked notebooks. **View → Roadmap panel** toggles the left
+planning outline. Each notebook has one automatically restored conversation in
+its canvas and a composer above the status footer, including standalone notebooks.
+Agent orchestration is not implemented. Saved outputs do not restore live Python
+variables after a runtime restart.
 
 ## Development workflow
 

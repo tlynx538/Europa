@@ -10,6 +10,8 @@ import { Outputs } from './Output'
 import { EditorIcon } from './EditorIcon'
 import * as Menubar from '@radix-ui/react-menubar'
 import { Workspace } from './Workspace'
+import { ActionMenu, ActionItem, ActionSeparator } from './ActionMenu'
+import { groupReceipts } from './receiptGroups'
 import { CommentIndicator, HeaderSlot, Layout, StatusSlot, usePanels } from './Layout'
 import { source, useNotebook } from './useNotebook'
 import { Navigation, type Navigate } from './Navigation'
@@ -23,7 +25,7 @@ function Menu({ name, children }: { name: string; children: React.ReactNode }) {
 }
 function PanelMenuItem({ side }: { side: 'left' | 'right' }) {
   const panels = usePanels()
-  return <Menubar.CheckboxItem className="menu-row" checked={panels[side]} onCheckedChange={side === 'left' ? panels.setLeft : panels.setRight}><Menubar.ItemIndicator className="menu-indicator">✓</Menubar.ItemIndicator>{side === 'left' ? 'Roadmap' : 'Discussion'} panel</Menubar.CheckboxItem>
+  return side === 'left' ? <Menubar.CheckboxItem className="menu-row" checked={panels.left} onCheckedChange={panels.setLeft}><Menubar.ItemIndicator className="menu-indicator">✓</Menubar.ItemIndicator>Roadmap panel</Menubar.CheckboxItem> : <MenuItem onSelect={() => document.querySelector<HTMLTextAreaElement>('.message-composer textarea')?.focus()}>Focus discussion</MenuItem>
 }
 function ProjectSettingsMenuItem() {
   const panels = usePanels()
@@ -35,7 +37,11 @@ function App() {
   const id = doc?.metadata.europa.notebook_id
   const [counts, setCounts] = useState<Record<string, number>>({})
   const [selectedCell, setSelectedCell] = useState<string | undefined>()
+  const [cellMenu, setCellMenu] = useState<string | null>(null)
+  const discussingCell = useRef(false)
   const pendingCell = useRef<{ notebook: string; cell: string } | null>(null)
+  const pendingAppend = useRef<{ notebook: string; cells: Set<string> } | null>(null)
+  const notebookScroll = useRef<HTMLDivElement>(null)
   const deleteArmed = useRef(0)
   const [activity, setActivity] = useState(false)
   const [conflictResult, setConflictResult] = useState<Receipt | null>(null)
@@ -60,7 +66,11 @@ function App() {
   const copy = () => { const cell = doc?.cells.find(c => c.id === selectedCell); if (cell) setClipboard({ cell_type: cell.cell_type, source: drafts[cell.id] ?? source(cell) }) }
   const cut = () => { const cell = doc?.cells.find(c => c.id === selectedCell); if (cell && !dirty && confirm('Cut selected cell?')) { setClipboard({ cell_type: cell.cell_type, source: source(cell) }); void nb.remove(cell.id) } }
   const paste = () => { if (clipboard) void nb.paste(clipboard, selectedCell ? (doc?.cells.findIndex(c => c.id === selectedCell) ?? -1) + 1 : doc?.cells.length ?? 0) }
-  const insert = () => { if (doc) void nb.mutate('/cells', { cell_type: 'code', index: selectedCell ? doc.cells.findIndex(c => c.id === selectedCell) + 1 : doc.cells.length }) }
+  const insert = () => {
+    if (!doc || busy || nb.active || remote) return
+    pendingAppend.current = { notebook: doc.metadata.europa.notebook_id, cells: new Set(doc.cells.map(cell => cell.id)) }
+    void nb.mutate('/cells', { cell_type: 'code', index: doc.cells.length })
+  }
   const revealCell = (cell: string) => {
     const element = document.getElementById(`cell-${cell}`)
     element?.scrollIntoView({ behavior: 'instant', block: 'nearest' })
@@ -68,6 +78,27 @@ function App() {
     if (element && element.getBoundingClientRect().top < top) element.closest<HTMLElement>('.notebook-editor')?.scrollBy({ top: element.getBoundingClientRect().top - top, behavior: 'instant' })
   }
   const selectAndReveal = (cell: string) => { setSelectedCell(cell); revealCell(cell) }
+  useEffect(() => {
+    const pending = pendingAppend.current
+    if (!pending) return
+    if (id !== pending.notebook) { pendingAppend.current = null; return }
+    const appended = doc?.cells.find(cell => !pending.cells.has(cell.id))
+    if (appended) {
+      pendingAppend.current = null
+      setSelectedCell(appended.id)
+      requestAnimationFrame(() => {
+        if (location.pathname !== `/notebooks/${pending.notebook}`) return
+        const element = document.getElementById(`cell-${appended.id}`)
+        const composer = document.querySelector('.composer-shell')?.getBoundingClientRect()
+        if (!element || !composer) return
+        const scroll = notebookScroll.current
+        if (!scroll) return
+        const bottom = element.getBoundingClientRect().bottom
+        if (bottom > composer.top - 8) scroll.scrollBy({ top: bottom - composer.top + 8, behavior: 'instant' })
+        revealCell(appended.id)
+      })
+    } else if (!busy && error) pendingAppend.current = null
+  }, [id, doc, busy, error])
   useEffect(() => {
     const command = (event: KeyboardEvent) => {
       if (!location.pathname.startsWith('/notebooks/') || event.altKey || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || (event.target instanceof HTMLElement && (event.target.isContentEditable || !!event.target.closest('.cm-editor, button, summary, dialog, [role=menubar], [role=menu]')))) return
@@ -94,25 +125,40 @@ function App() {
   })
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('europa.theme', theme) }, [theme])
   const updateCounts = useCallback((value: Record<string, number>) => setCounts(value), [])
-  useEffect(() => { setConflictResult(null); const pending = pendingCell.current; setSelectedCell(pending && pending.notebook === id && doc?.cells.some(c => c.id === pending.cell) ? pending.cell : undefined); pendingCell.current = null; setMode('command') }, [id])
+  useEffect(() => { pendingAppend.current = null; setConflictResult(null); const pending = pendingCell.current; setSelectedCell(pending && pending.notebook === id && doc?.cells.some(c => c.id === pending.cell) ? pending.cell : undefined); pendingCell.current = null; setMode('command') }, [id])
+  useEffect(() => {
+    if (!id || !doc || notebookScroll.current === null) return
+    const saved = Number(sessionStorage.getItem(`europa.notebook.scroll.${id}`))
+    if (Number.isFinite(saved) && saved >= 0) notebookScroll.current.scrollTop = saved
+  }, [id])
   useEffect(() => {
     if (mode !== 'edit' || !selectedCell || doc?.cells.find(cell => cell.id === selectedCell)?.cell_type !== 'markdown') return
     const frame = requestAnimationFrame(() => document.querySelector<HTMLElement>(`#cell-${CSS.escape(selectedCell)} .cm-content`)?.focus())
     return () => cancelAnimationFrame(frame)
   }, [mode, selectedCell, id])
   const latest = Object.fromEntries(receipts.map(r => [r.cell_id, r]))
+  const history = groupReceipts(receipts, doc?.cells.map(c => c.id) ?? [])
+  const revealHistory = () => {
+    const cell = selectedCell && history.cells[selectedCell]?.length ? selectedCell : doc?.cells.find(c => history.cells[c.id]?.length)?.id
+    const target = cell ? document.querySelector<HTMLDetailsElement>(`[data-history-cell="${CSS.escape(cell)}"]`) : document.querySelector<HTMLDetailsElement>('.orphan-receipts')
+    if (!target) return
+    target.open = true
+    requestAnimationFrame(() => target.scrollIntoView({ block: 'nearest' }))
+  }
+  const receiptRows = (items: Receipt[]) => items.map(r => <div className="receipt-row" key={r.execution_id}><code>{r.execution_id}</code> · {r.state}{r.result ? ` · ${r.result.status}` : ''}
+    {r.state === 'conflict' && <button onClick={() => void nb.action(async () => setConflictResult(await request<Receipt>(`/notebooks/${id}/executions/${r.execution_id}`)))}>Inspect conflict outputs</button>}</div>)
   const openNotebook = useCallback(async (target: string) => target === nb.doc?.metadata.europa.notebook_id ? true : !!await nb.open(target), [nb])
   const editor = (routeId: string, navigate: Navigate) => <Layout><HeaderSlot><div className="notebook-chrome-title"><h1>{doc?.metadata.europa.title ?? 'Notebook'}</h1><span className="save-indicator">{dirty ? 'Unsaved draft' : doc ? 'Saved' : ''} · Revision {doc?.metadata.europa.revision ?? '—'}</span></div><Menubar.Root className="notebook-menubar" value={openMenu ?? ''} onValueChange={value => setOpenMenu(value || null)}>
     <Menu name="File"><MenuItem onSelect={() => void navigate('/projects')}>Open project…</MenuItem><MenuItem onSelect={() => void navigate('/notebooks')}>Open notebook…</MenuItem><MenuItem onSelect={() => void navigate('/notebooks')}>Close notebook</MenuItem><Menubar.Separator className="menu-separator" /><MenuItem onSelect={() => void navigate('/notebooks')}>New notebook…</MenuItem><MenuItem disabled={busy || !dirty || !!remote} onSelect={() => void nb.save()} shortcut="⌘/Ctrl S">Save</MenuItem>
     {doc && <><Menubar.Separator className="menu-separator" /><MenuItem disabled={busy || dirty} onSelect={() => { const title = prompt('Notebook title', doc.metadata.europa.title)?.trim(); if (title) void nb.mutate('', { title }, 'PATCH') }}>Rename</MenuItem><MenuItem disabled={busy} onSelect={() => { if (!dirty || confirm('Discard browser drafts and reload saved notebook?')) void nb.open(id!, true) }}>Reload saved notebook</MenuItem></>}<Menubar.Separator className="menu-separator" /><ProjectSettingsMenuItem /></Menu>
     <Menu name="Edit"><MenuItem disabled={!selectedCell || busy || nb.active} onSelect={copy} shortcut="C">Copy cell</MenuItem><MenuItem disabled={!selectedCell || busy || nb.active || dirty || !!remote} title={dirty ? 'Save all drafts before cutting a cell. Copy and paste remain available.' : 'Cut selected cell'} onSelect={cut} shortcut="X">Cut cell</MenuItem><MenuItem disabled={!clipboard || busy || nb.active} onSelect={paste} shortcut="V">Paste cell</MenuItem><Menubar.Separator className="menu-separator" /><MenuItem disabled={!selectedCell || busy || nb.active} onSelect={() => { const cell = doc?.cells.find(c => c.id === selectedCell); if (cell && confirm('Change cell type? Previous execution outputs will be cleared.')) void nb.mutate(`/cells/${cell.id}/type`, { cell_type: cell.cell_type === 'code' ? 'markdown' : 'code' }) }}>Toggle cell type</MenuItem><MenuItem disabled={!selectedCell || busy || nb.active || dirty} onSelect={() => { if (selectedCell && confirm('Delete selected cell?')) void nb.remove(selectedCell) }}>Delete cell</MenuItem></Menu>
-    <Menu name="View"><Menubar.Sub><Menubar.SubTrigger className="menu-row">Theme <span className="menu-shortcut" aria-hidden="true">›</span></Menubar.SubTrigger><Menubar.Portal><Menubar.SubContent className="menu-content" collisionPadding={8} sideOffset={4}><Menubar.RadioGroup value={theme} onValueChange={setTheme}>{['system', 'light', 'dark'].map(value => <Menubar.RadioItem key={value} className="menu-row" value={value}><Menubar.ItemIndicator className="menu-indicator">●</Menubar.ItemIndicator>{value[0].toUpperCase() + value.slice(1)}</Menubar.RadioItem>)}</Menubar.RadioGroup></Menubar.SubContent></Menubar.Portal></Menubar.Sub><Menubar.Separator className="menu-separator" /><Menubar.CheckboxItem className="menu-row" checked={nb.autosave} onCheckedChange={nb.setAutosave}><Menubar.ItemIndicator className="menu-indicator">✓</Menubar.ItemIndicator>Autosave</Menubar.CheckboxItem><PanelMenuItem side="left" /><PanelMenuItem side="right" /><Menubar.Separator className="menu-separator" /><MenuItem onSelect={() => document.querySelector('.receipt-history')?.scrollIntoView()}>Execution history</MenuItem><MenuItem onSelect={() => setActivity(!activity)}>Contextual activity</MenuItem></Menu>
+    <Menu name="View"><Menubar.Sub><Menubar.SubTrigger className="menu-row">Theme <span className="menu-shortcut" aria-hidden="true">›</span></Menubar.SubTrigger><Menubar.Portal><Menubar.SubContent className="menu-content" collisionPadding={8} sideOffset={4}><Menubar.RadioGroup value={theme} onValueChange={setTheme}>{['system', 'light', 'dark'].map(value => <Menubar.RadioItem key={value} className="menu-row" value={value}><Menubar.ItemIndicator className="menu-indicator">●</Menubar.ItemIndicator>{value[0].toUpperCase() + value.slice(1)}</Menubar.RadioItem>)}</Menubar.RadioGroup></Menubar.SubContent></Menubar.Portal></Menubar.Sub><Menubar.Separator className="menu-separator" /><Menubar.CheckboxItem className="menu-row" checked={nb.autosave} onCheckedChange={nb.setAutosave}><Menubar.ItemIndicator className="menu-indicator">✓</Menubar.ItemIndicator>Autosave</Menubar.CheckboxItem><PanelMenuItem side="left" /><Menubar.Separator className="menu-separator" /><MenuItem disabled={!receipts.length} onSelect={revealHistory}>Execution history</MenuItem><MenuItem onSelect={() => setActivity(!activity)}>Contextual activity</MenuItem></Menu>
     <Menu name="Run"><MenuItem disabled={!runnable(selectedCell)} onSelect={() => { if (selectedCell && runnable(selectedCell)) void nb.execute(selectedCell) }}>Run selected cell</MenuItem><MenuItem disabled={!canRun} onSelect={() => void nb.runAll()}>Run all (sequential)</MenuItem></Menu>
     <Menu name="Kernel"><MenuItem onSelect={() => { setOpenMenu(null); setKernelOpen(true) }}>Kernel information</MenuItem></Menu>
     <Menu name="Help"><MenuItem onSelect={() => { setOpenMenu(null); setShortcutsOpen(true) }}>Keyboard shortcuts</MenuItem></Menu>
     </Menubar.Root>{id === routeId && doc && <div className="toolbar editor-tools" role="toolbar" aria-label="Notebook commands" onMouseDown={event => { if ((event.target as HTMLElement).closest('button')) event.preventDefault() }}><span className="editor-mode">Mode: {mode}</span>
       <button aria-label="Save notebook" title="Save notebook" disabled={busy || !dirty || !!remote} onClick={() => void nb.save()}><EditorIcon name="save" /></button>
-      <button aria-label="Insert cell" title="Insert code cell below" disabled={busy || nb.active || !!remote} onClick={insert}><EditorIcon name="add" /></button>
+      <button aria-label="Insert cell" title="Add code cell at end" disabled={busy || nb.active || !!remote} onClick={insert}><EditorIcon name="add" /></button>
       <span className="toolbar-divider" aria-hidden="true" />
       <button aria-label="Cut cell" title={dirty ? 'Save all drafts before cutting a cell' : 'Cut selected cell'} disabled={!selectedCell || busy || nb.active || dirty || !!remote} onClick={cut}><EditorIcon name="cut" /></button>
       <button aria-label="Copy cell" title="Copy selected cell" disabled={!selectedCell} onClick={copy}><EditorIcon name="copy" /></button>
@@ -122,7 +168,13 @@ function App() {
       <button aria-label="Interrupt selected execution" title="Interrupt selected execution" disabled={!selectedCell || latest[selectedCell]?.state !== 'running' || busy} onClick={() => { if (selectedCell && latest[selectedCell]?.state === 'running') void nb.action(async () => { await request(`/notebooks/${id}/executions/${latest[selectedCell].execution_id}/interrupt`, { method: 'POST' }); nb.setError('Interrupt requested; waiting for the authoritative receipt result.') }) }}><EditorIcon name="interrupt" /></button>
       <label>Cell type <select aria-label="Cell type" value={doc.cells.find(c => c.id === selectedCell)?.cell_type ?? 'code'} disabled={!selectedCell || busy || nb.active} onChange={e => { if (selectedCell && confirm('Change cell type? Previous execution outputs will be cleared.')) void nb.mutate(`/cells/${selectedCell}/type`, { cell_type: e.target.value }) }}><option value="code">Code</option><option value="markdown">Markdown</option></select></label>
       <span className="toolbar-kernel" title={`Observed kernel: ${nb.session.state} (${nb.session.kernels})`}>Kernel: {nb.session.state} ({nb.session.kernels})</span>
-    </div>}</HeaderSlot><main className="notebook-editor">
+    </div>}</HeaderSlot>{id === routeId && <Workspace notebookId={id} revision={doc?.metadata.europa.revision} cells={doc?.cells.map(c => ({ id: c.id, source: source(c) })) ?? []} draftCells={Object.keys(drafts)} conflict={!!remote} selectedCell={selectedCell} showActivity={activity} onCommentCounts={updateCounts} navigate={navigate} onOpenNotebook={async (notebook, cell) => {
+    if (notebook !== id && cell) pendingCell.current = { notebook, cell }
+    if (!await navigate(`/notebooks/${notebook}`)) { pendingCell.current = null; return false }
+    if (notebook === id && cell && doc?.cells.some(c => c.id === cell)) selectAndReveal(cell)
+    if (notebook !== id && cell) requestAnimationFrame(() => revealCell(cell))
+    return true
+  }} renderNotebook={canvas => <main className="notebook-column"><div className="notebook-editor" ref={notebookScroll} onScroll={event => { if (id === routeId) sessionStorage.setItem(`europa.notebook.scroll.${routeId}`, String(event.currentTarget.scrollTop)) }}>
     <dialog ref={shortcuts} className="editor-dialog" aria-label="Keyboard shortcuts" onClose={() => { setShortcutsOpen(false); document.querySelector<HTMLElement>('.notebook-menubar [data-state][aria-haspopup=menu]:last-of-type')?.focus() }}><h2>Keyboard shortcuts</h2><p>Shift+Enter runs a code cell and selects the next cell; Ctrl/Cmd+Enter runs without advancing; Ctrl/Cmd+S saves drafts. Escape leaves edit mode. In command mode: J/K or arrows select cells, Enter edits, A/B inserts above/below, C copies, V pastes, X cuts saved cells, D D deletes saved cells, M/Y changes cell type. Receipt history records execution outcomes. Kernel restart is unavailable.</p><button onClick={() => setShortcutsOpen(false)}>Close shortcuts</button></dialog>
     <dialog ref={kernelInfo} className="editor-dialog" aria-label="Kernel information" onClose={() => { setKernelOpen(false); Array.from(document.querySelectorAll<HTMLElement>('.notebook-menubar [aria-haspopup=menu]')).find(element => element.textContent === 'Kernel')?.focus() }}><h2>Kernel information</h2><p>Observed kernel: {nb.session.state} ({nb.session.kernels}). Restart and shutdown are unavailable without a verified notebook-scoped control contract. Saved outputs do not preserve interpreter state.</p><button onClick={() => setKernelOpen(false)}>Close kernel information</button></dialog>
     {id !== routeId && <p role="status">Opening notebook…</p>}
@@ -136,20 +188,25 @@ function App() {
       <button disabled={Object.keys(drafts).some(cell => !remote.cells.some(c => c.id === cell))} onClick={() => nb.resolve(true)}>Keep drafts for review</button>{' '}
       <button onClick={() => nb.resolve(false)}>Discard drafts and use saved version</button><p>Copy drafts of deleted cells before discarding them.</p>
     </section>}
-    {doc?.cells.map((cell, index) => <section className={`cell ${selectedCell === cell.id ? 'selected' : ''} ${selectedCell === cell.id && mode === 'edit' ? 'editing' : ''}`} id={`cell-${cell.id}`} key={cell.id} tabIndex={0} aria-label={`${cell.cell_type} cell ${index + 1}`} onFocus={() => setSelectedCell(cell.id)} onClick={() => setSelectedCell(cell.id)}>
+    {canvas.beforeCells}
+    {doc?.cells.map((cell, index) => <React.Fragment key={cell.id}><section className={`cell ${selectedCell === cell.id ? 'selected' : ''} ${selectedCell === cell.id && mode === 'edit' ? 'editing' : ''}`} id={`cell-${cell.id}`} tabIndex={0} aria-label={`${cell.cell_type} cell ${index + 1}`} onFocus={event => { if (!(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return; setSelectedCell(cell.id); if (!(event.target as HTMLElement).closest('.cell-actions')) setCellMenu(null) }} onClick={event => { if (!(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return; setSelectedCell(cell.id); if (!(event.target as HTMLElement).closest('.cell-actions')) setCellMenu(null) }}>
       <div className="cell-row"><div className="cell-gutter">{cell.cell_type === 'code' ? `In [${cell.execution_count ?? ' '}]:` : ''}</div><div className="cell-body">
       <div className="cell-meta">{counts[cell.id] ? <CommentIndicator cell={cell.id} count={counts[cell.id]} /> : null}
-        <span className={latest[cell.id]?.state === 'applied' && latest[cell.id]?.result?.status === 'ok' && cell.metadata.europa?.execution_id === latest[cell.id]?.execution_id && drafts[cell.id] === undefined ? 'routine-execution' : undefined}>{latest[cell.id] ? `${latest[cell.id].state === 'applied' && cell.metadata.europa?.execution_id !== latest[cell.id].execution_id ? 'Previous execution' : 'Execution'}: ${latest[cell.id].state}${latest[cell.id].result ? ` (${latest[cell.id].result!.status})` : ''}${drafts[cell.id] !== undefined ? ' · draft not executed' : ''}` : cell.metadata.europa?.status ?? ''}</span>
-        <details className="cell-actions"><summary>Cell actions</summary><div>
-          <button disabled={busy || nb.active || !!remote} onClick={() => void nb.mutate('/cells', { cell_type: 'code', index })}>Insert above</button>
-          <button disabled={busy || nb.active || !!remote} onClick={() => void nb.mutate('/cells', { cell_type: 'code', index: index + 1 })}>Insert below</button>
-          <button disabled={busy || drafts[cell.id] === undefined || !!remote} onClick={() => void nb.save()}>Save cell</button>
-          {cell.cell_type === 'code' && <button disabled={!runnable(cell.id)} onClick={() => { if (runnable(cell.id)) void nb.execute(cell.id) }}>Run</button>}
-          {latest[cell.id]?.state === 'running' && <button disabled={busy} onClick={() => void nb.action(async () => { await request(`/notebooks/${id}/executions/${latest[cell.id].execution_id}/interrupt`, { method: 'POST' }); nb.setError('Interrupt requested; waiting for the authoritative receipt result.') })}>Interrupt</button>}
-          <button aria-label={`Move cell ${index + 1} up`} disabled={busy || nb.active || !!remote || index === 0} onClick={() => void nb.mutate(`/cells/${cell.id}/move`, { index: index - 1 })}>Move up</button>
-          <button aria-label={`Move cell ${index + 1} down`} disabled={busy || nb.active || !!remote || index === doc.cells.length - 1} onClick={() => void nb.mutate(`/cells/${cell.id}/move`, { index: index + 1 })}>Move down</button>
-          <button disabled={busy || nb.active || !!remote || dirty} onClick={() => { if (confirm('Delete this cell?')) void nb.remove(cell.id) }}>Delete</button>
-        </div></details>
+        <div className="cell-move" role="group" aria-label={`Reorder cell ${index + 1}`}>
+          <button aria-label={`Move cell ${index + 1} up`} title={`Move cell ${index + 1} up`} disabled={busy || nb.active || !!remote || index === 0} onClick={() => void nb.mutate(`/cells/${cell.id}/move`, { index: index - 1 })}><EditorIcon name="up" /></button>
+          <button aria-label={`Move cell ${index + 1} down`} title={`Move cell ${index + 1} down`} disabled={busy || nb.active || !!remote || index === doc.cells.length - 1} onClick={() => void nb.mutate(`/cells/${cell.id}/move`, { index: index + 1 })}><EditorIcon name="down" /></button>
+        </div>
+        <ActionMenu label={`Cell actions for cell ${index + 1}`} trigger="Cell actions" triggerClassName="cell-actions" modal={false} open={cellMenu === cell.id} onOpenChange={open => { setCellMenu(open ? cell.id : null); if (open) setOpenMenu(null) }} onCloseAutoFocus={event => { if (discussingCell.current) { event.preventDefault(); discussingCell.current = false } }}>
+          <ActionItem className="menu-row" onSelect={() => { discussingCell.current = true; canvas.discussCell(cell.id) }}>Discuss cell</ActionItem>
+          <ActionSeparator className="menu-separator" />
+          <ActionItem className="menu-row" disabled={busy || nb.active || !!remote} onSelect={() => void nb.mutate('/cells', { cell_type: 'code', index })}>Insert above</ActionItem>
+          <ActionItem className="menu-row" disabled={busy || nb.active || !!remote} onSelect={() => void nb.mutate('/cells', { cell_type: 'code', index: index + 1 })}>Insert below</ActionItem>
+          <ActionItem className="menu-row" disabled={busy || drafts[cell.id] === undefined || !!remote} onSelect={() => void nb.save()}>Save cell</ActionItem>
+          {cell.cell_type === 'code' && <ActionItem className="menu-row" disabled={!runnable(cell.id)} onSelect={() => { if (runnable(cell.id)) void nb.execute(cell.id) }}>Run</ActionItem>}
+          {latest[cell.id]?.state === 'running' && <ActionItem className="menu-row" disabled={busy} onSelect={() => void nb.action(async () => { await request(`/notebooks/${id}/executions/${latest[cell.id].execution_id}/interrupt`, { method: 'POST' }); nb.setError('Interrupt requested; waiting for the authoritative receipt result.') })}>Interrupt</ActionItem>}
+          <ActionSeparator className="menu-separator" />
+          <ActionItem className="menu-row destructive" disabled={busy || nb.active || !!remote || dirty} onSelect={() => { if (confirm('Delete this cell?')) void nb.remove(cell.id) }}>Delete</ActionItem>
+        </ActionMenu>
       </div>
       {(cell.cell_type === 'code' || (mode === 'edit' && selectedCell === cell.id)) && <CodeMirror value={drafts[cell.id] ?? source(cell)} basicSetup={{ lineNumbers: false, highlightActiveLine: false, highlightActiveLineGutter: false, foldGutter: false }} theme={theme === 'dark' || (theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light'} onFocus={() => { setSelectedCell(cell.id); setMode('edit') }} onBlur={() => setMode('command')} extensions={[
         ...(cell.cell_type === 'code' ? [python()] : []),
@@ -160,23 +217,18 @@ function App() {
       {cell.cell_type === 'markdown' && (mode !== 'edit' || selectedCell !== cell.id) && <div className="markdown-preview" onDoubleClick={() => setMode('edit')}><Markdown skipHtml components={{ a: ({ children }) => <span>{children}</span>, img: ({ alt }) => <span>[Image: {alt ?? ''}]</span> }}>{drafts[cell.id] ?? source(cell)}</Markdown></div>}
       {cell.cell_type === 'code' && !!cell.outputs?.length && <div className="cell-output"><Outputs outputs={cell.outputs} /></div>}
       {!cell.metadata.europa && typeof cell.metadata.europa_recovered_output === 'string' && <p className="muted">Historical output copied from conflict receipt {cell.metadata.europa_recovered_output}. Not a fresh execution result.</p>}
+      {!!history.cells[cell.id]?.length && <div className="cell-history"><details className="receipt-history cell-receipts" data-history-cell={cell.id}><summary aria-label={`Execution history for cell ${index + 1}`} title={`Execution history for cell ${index + 1}`}><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>{history.cells[cell.id].length}</span><span className="visually-hidden"> execution receipts for cell {index + 1}</span></summary>
+        <div className="receipt-rows">{receiptRows(history.cells[cell.id])}</div></details>
+        {latest[cell.id] && <p role="status" className={latest[cell.id].state === 'applied' && latest[cell.id].result?.status === 'ok' && cell.metadata.europa?.execution_id === latest[cell.id].execution_id && drafts[cell.id] === undefined ? 'routine-execution' : 'execution-notice'}>{latest[cell.id].state === 'applied' && cell.metadata.europa?.execution_id !== latest[cell.id].execution_id ? 'Previous execution' : 'Execution'}: {latest[cell.id].state}{latest[cell.id].result?.status ? ` (${latest[cell.id].result?.status})` : ''}{drafts[cell.id] !== undefined ? ' · draft not executed' : ''}</p>}</div>}
       </div></div>
-    </section>)}
-    {receipts.length > 0 && <details className="receipt-history"><summary>Execution history ({receipts.length})</summary>{receipts.map(r => <div key={r.execution_id}><code>{r.execution_id.slice(0, 10)}</code> · {r.state} {r.result?.status}
-      {r.state === 'conflict' && <button onClick={() => void nb.action(async () => setConflictResult(await request<Receipt>(`/notebooks/${id}/executions/${r.execution_id}`)))}>Inspect conflict outputs</button>}</div>)}</details>}
+    </section>{canvas.afterCell(cell.id)}</React.Fragment>)}
+    {canvas.history}
+    {history.orphans.length > 0 && <details className="receipt-history orphan-receipts"><summary>Execution history for deleted cells ({history.orphans.length})</summary><div className="receipt-rows">{history.orphans.map(r => <div key={r.execution_id}><strong>Deleted cell {r.cell_id}</strong>{receiptRows([r])}</div>)}</div></details>}
     {conflictResult && <section className="conflict"><h2>Conflict output — not applied</h2><p>Receipt {conflictResult.execution_id}. Newer edits are unchanged. You may explicitly copy historical output only if the source still matches. The receipt will remain conflict, never execution evidence of success. Re-run reviewed code for a fresh result.</p><Outputs outputs={conflictResult.result?.outputs ?? []} />
       <button disabled={busy || dirty || nb.active} onClick={() => { if (confirm('Replace this cell’s saved outputs with historical conflict output? Source must match and the current revision must still be valid.')) void nb.importConflict(conflictResult) }}>Copy historical output to unchanged cell</button>{' '}
       <button onClick={() => setConflictResult(null)}>Dismiss preview (receipt retained)</button></section>}
     </div><StatusSlot><footer className="status" role="status"><details><summary><span>API: {nb.connection}</span><span>Kernel: {nb.session.state} ({nb.session.kernels})</span><span>{busy ? 'Saving / requesting…' : nb.paused ? 'Autosave paused' : dirty ? 'Unsaved draft (browser recovery)' : doc ? 'Document saved' : 'No notebook selected'}</span><span>{nb.active ? 'Pending execution receipt' : 'No pending receipt'}{receipts.some(r => r.state === 'uncertain') ? ' · Uncertain receipt — review history' : ''}</span></summary><div className="status-details"><small>Saved outputs do not checkpoint Python variables. Execution history and receipts remain available in the notebook.</small></div></details></footer></StatusSlot></>}
-  </main>{id === routeId && <Workspace notebookId={id} revision={doc?.metadata.europa.revision} cells={doc?.cells ?? []} selectedCell={selectedCell} showActivity={activity} onCommentCounts={updateCounts} navigate={navigate} onOpenNotebook={async (notebook, cell) => {
-    if (notebook !== id && cell) pendingCell.current = { notebook, cell }
-    if (!await navigate(`/notebooks/${notebook}`)) { pendingCell.current = null; return false }
-    if (notebook === id && cell && doc?.cells.some(c => c.id === cell)) {
-      selectAndReveal(cell)
-    }
-    if (notebook !== id && cell) requestAnimationFrame(() => revealCell(cell))
-    return true
-  }} />}</Layout>
+  </div>{canvas.composer}</main>} />}</Layout>
   return <Navigation openNotebook={openNotebook} renderNotebook={editor} currentNotebookId={id} onNotebookDeleted={nb.forget} beforeLeave={() => {
     if (busy || nb.active) { nb.setError('Notebook operation or execution receipt is still pending. Wait for it to settle before leaving; execution is not cancelled.'); return false }
     if (dirty && !confirm('Keep drafts in this browser and leave the notebook?')) return false

@@ -157,6 +157,8 @@ class MessageData(Links):
     state: Literal['published', 'needs_input']
     author_role: AuthorRole
     conversation_id: str
+    # Absent on pre-placement records; null on new messages sent before the first cell.
+    placement_after_cell_id: str | None = None
 
 
 class TaskDisplay(Model):

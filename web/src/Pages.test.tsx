@@ -108,7 +108,7 @@ it('shows server roadmap, conversation and activity in project sections', async 
     : url.endsWith('/notebooks') ? [] : { items: url.includes('/roadmaps?') ? [{ id: 'r', data: { objective: 'Ship', progress: 50, tasks: [] } }] : url.includes('/conversations?') ? [{ id: 'c', data: { title: 'Planning' } }] : url.includes('/activities?') ? [{ id: 'a', created_at: 1700000000, data: { summary: 'Reviewed', result: 'done' } }] : [], next_cursor: null })))
   render(<ProjectDetail id="one" navigate={async () => true} />)
   expect(await screen.findByText(/Ship · 50%/)).toBeTruthy()
-  expect(screen.getByText('Planning')).toBeTruthy()
+  expect(screen.getByText(/Planning · c · Project-wide/)).toBeTruthy()
   expect(screen.getByText('Reviewed')).toBeTruthy()
   expect(screen.getByText('done')).toBeTruthy()
 })
@@ -172,4 +172,20 @@ it('creates a notebook then associates it using the project revision before open
   expect(created).toBeGreaterThan(-1)
   expect(assigned).toBeGreaterThan(created)
   expect(JSON.parse(sent[assigned].body!)).toMatchObject({ revision: 1, notebook_id: 'new' })
+})
+
+it('recovers the saved notebook id after canonical initialization fails without posting a second notebook', async () => {
+  vi.stubGlobal('prompt', () => 'New notebook')
+  const calls: string[] = [], navigate = vi.fn(async () => true)
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (init?.method === 'POST') {
+      calls.push(url)
+      return new Response(JSON.stringify({ detail: { message: 'Conversation unavailable', notebook_id: 'a'.repeat(32), recovery: `/api/notebooks/${'a'.repeat(32)}/conversation` } }), { status: 503 })
+    }
+    return new Response(JSON.stringify(url.includes('/projects?') ? { items: [], next_cursor: null } : []))
+  }))
+  render(<NotebookLibrary navigate={navigate} />)
+  fireEvent.click(screen.getByRole('button', { name: 'New notebook' }))
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/notebooks/${'a'.repeat(32)}`))
+  expect(calls).toEqual(['/api/notebooks'])
 })

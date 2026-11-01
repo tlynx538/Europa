@@ -1,6 +1,11 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
 const api = `http://127.0.0.1:${process.env.EUROPA_TEST_PORT || '18000'}/api`
+async function roadmap(page: Page) {
+  await page.getByRole('menubar').getByRole('menuitem', { name: 'View' }).click()
+  await page.getByRole('menuitemcheckbox', { name: 'Roadmap panel' }).click()
+  await expect(page.locator('#roadmap')).toBeVisible()
+}
 
 test('menus are single-open, keyboard accessible and bounded by the viewport', async ({ page, request }) => {
   const created = await request.post(`${api}/notebooks`, { data: { title: 'Menu accessibility' } })
@@ -44,7 +49,7 @@ test('menus are single-open, keyboard accessible and bounded by the viewport', a
   await expect(menus.getByRole('menuitem', { name: 'Kernel' })).toHaveAttribute('data-state', 'closed')
   await menus.getByRole('menuitem', { name: 'File' }).click()
   await page.keyboard.press('Escape')
-  await page.getByRole('button', { name: 'Roadmap', exact: true }).click()
+  await roadmap(page)
   await expect(page.getByRole('dialog', { name: 'Project and roadmap' })).toBeVisible()
   await expect(page.getByRole('menu')).toHaveCount(0)
   await page.keyboard.press('Escape')
@@ -95,7 +100,7 @@ test('roadmap shows progress before project settings and an explicit no-roadmap 
   const project = await (await request.post(`${api}/projects`, { data: { operation_id: crypto.randomUUID(), title: 'Roadmap context' } })).json()
   await request.post(`${api}/projects/${project.id}/notebooks`, { data: { operation_id: crypto.randomUUID(), revision: 1, notebook_id: id } })
   await page.goto(`/notebooks/${id}`)
-  await page.getByRole('button', { name: 'Roadmap', exact: true }).click()
+  await roadmap(page)
   await expect(page.getByText('No roadmap yet. Create a plan with its first task in Project settings.')).toBeVisible()
   const panel = page.locator('#roadmap')
   await expect(panel.getByRole('button', { name: 'Refresh project history' })).toBeHidden()
@@ -125,7 +130,7 @@ test('paused notebook shortcuts never submit execution or advance selection', as
   await page.locator('.cell .cm-content').first().click()
   await page.keyboard.insertText(' # draft')
   await page.getByRole('button', { name: 'Compare with saved notebook' }).click()
-  await expect(page.getByRole('status')).toContainText('Autosave paused')
+  await expect(page.locator('footer.status')).toContainText('Autosave paused')
   const executions: string[] = []
   page.on('request', r => { if (r.method() === 'POST' && r.url().includes('/execute')) executions.push(r.url()) })
   await page.locator('.cell .cm-content').first().click()

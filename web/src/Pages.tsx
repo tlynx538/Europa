@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ApiError, json, request } from './api'
-import { all, change, pendingMutation, retryMutation, type Activity, type Conversation, type Project, type RecordData, type Roadmap } from './applicationApi'
+import { all, change, pendingMutation, retryMutation, type Activity, type Message, type Conversation, type Project, type RecordData, type Roadmap } from './applicationApi'
 import type { Meta } from './useNotebook'
 import type { Navigate } from './Navigation'
 import { ActionMenu, ActionItem, ActionSeparator } from './ActionMenu'
@@ -36,6 +36,16 @@ export function ProjectsPage({ navigate }: BrowserProps) {
     <ul className="browser-list">{visible.map(p => <li key={p.id}><a href={projectUrl(p.id)} onClick={e => { e.preventDefault(); void navigate(projectUrl(p.id)) }}>{p.data.title}</a><span>{p.data.status} · {p.data.notebooks.filter(n => n.present).length} notebooks</span></li>)}</ul>
     {loaded && visible.length === 0 && <p className="browser-empty">{projects.length ? 'No projects match your search.' : 'No projects yet. Create a project to organize notebooks.'}</p>}
   </main>
+}
+
+function LegacyProjectThread({ conversation }: { conversation: RecordData<Conversation> }) {
+  const [messages, setMessages] = useState<RecordData<Message>[]>([]), [error, setError] = useState('')
+  useEffect(() => { let live = true
+    void all<Message>(`/conversations/${conversation.id}/messages`).then(items => { if (live) setMessages(items) }).catch(e => { if (live) setError(String(e)) })
+    return () => { live = false }
+  }, [conversation.id])
+  return <li>{conversation.data.title} · {conversation.id}{conversation.notebook_id ? ` · Notebook ${conversation.notebook_id}` : ' · Project-wide'}
+    {error && <p role="alert">{error}</p>}{messages.map(m => <article key={m.id}><strong>{m.data.author_role}</strong> · {m.id}<p>{m.data.content}</p></article>)}</li>
 }
 
 export function ProjectDetail({ id, navigate }: BrowserProps & { id: string }) {
@@ -91,14 +101,20 @@ export function ProjectDetail({ id, navigate }: BrowserProps & { id: string }) {
       }) }}><option value="">Choose a notebook</option>{available.map(n => <option key={n.notebook_id} value={n.notebook_id}>{n.title}</option>)}</select></label>}
       {project.data.status === 'active' && <button disabled={busy || pending} onClick={() => void run(async () => {
         const title = prompt('Notebook title')?.trim(); if (!title) return
-        const created = await request<{ metadata: { europa: Meta } }>('/notebooks', json('POST', { title }))
+        let created: { metadata: { europa: Meta } }
+        try { created = await request('/notebooks', json('POST', { title })) }
+        catch (e) {
+          if (!(e instanceof ApiError) || !e.recoveryNotebookId) throw e
+          await navigate(notebookUrl(e.recoveryNotebookId))
+          throw new Error(`Notebook ${e.recoveryNotebookId} was saved but its conversation is unavailable. Open the saved notebook and retry the canonical conversation there; do not create it again.`)
+        }
         const notebook_id = created.metadata.europa.notebook_id
         try { await change(`${projectUrl(id)}/notebooks`, 'POST', { revision: project.revision, notebook_id }) }
         catch (e) { await refresh().catch(() => {}); throw new Error(`Notebook ${notebook_id} was created but could not be assigned. It remains standalone; retry the pending association before any other application change. ${String(e)}`) }
         await refresh(); await navigate(notebookUrl(notebook_id))
       })}>New notebook in project</button>}</section>
       <section id="project-roadmap"><h2>Roadmap</h2>{roadmaps.length ? <ul>{roadmaps.map(r => <li key={r.id}>{r.data.objective} · {r.data.progress}% · {r.data.tasks.length} tasks</li>)}</ul> : <p>No roadmaps yet. Open a notebook to work on a roadmap.</p>}</section>
-      <section id="project-conversations"><h2>Conversations</h2>{conversations.length ? <ul>{conversations.map(c => <li key={c.id}>{c.data.title}</li>)}</ul> : <p>No conversations yet. Open a notebook to start a discussion.</p>}</section>
+      <section id="project-conversations"><h2>Legacy project conversation history (read-only)</h2>{conversations.length ? <ul>{conversations.map(c => <LegacyProjectThread key={c.id} conversation={c} />)}</ul> : <p>No legacy project conversations.</p>}</section>
        <section id="project-activity"><h2>Activity</h2>{activities.length ? <ActivityTimeline activities={activities} navigate={navigate} notebooks={notebooks} roadmaps={roadmaps} /> : !errorLoad && <p>No activity recorded for this project. Open a notebook to continue work.</p>}</section>
     </>}
   </main>
@@ -115,7 +131,13 @@ export function NotebookLibrary({ navigate, currentNotebookId, onNotebookDeleted
    return <main className="browser-page notebook-browser"><div className="browser-heading"><div><h1>Notebooks</h1><p className="muted">Saved notebooks · {notebooks.length} total</p></div></div>{(error || loadError) && <p role="alert" className="alert">{error || loadError}</p>}
     <button disabled={busy} onClick={() => void run(async () => {
       const title = prompt('Notebook title')?.trim(); if (!title) return
-      const created = await request<{ metadata: { europa: Meta } }>('/notebooks', json('POST', { title }))
+      let created: { metadata: { europa: Meta } }
+      try { created = await request('/notebooks', json('POST', { title })) }
+      catch (e) {
+        if (!(e instanceof ApiError) || !e.recoveryNotebookId) throw e
+        await navigate(notebookUrl(e.recoveryNotebookId))
+        throw new Error(`Notebook ${e.recoveryNotebookId} was saved but its conversation is unavailable. Open the saved notebook and retry the canonical conversation there; do not create it again.`)
+      }
       await navigate(notebookUrl(created.metadata.europa.notebook_id)); await refresh()
     })}>New notebook</button>
     <div className="browser-filters"><label>Search notebooks <input type="search" value={query} onChange={e => setQuery(e.target.value)} /></label><label>Sort notebooks <select value={sort} onChange={e => setSort(e.target.value)}><option value="title-asc">Title A–Z</option><option value="title-desc">Title Z–A</option><option value="revision-desc">Revision (highest first)</option></select></label></div>

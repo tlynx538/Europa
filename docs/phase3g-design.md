@@ -1,5 +1,13 @@
 # Phase 3G implementation brief
 
+This document retains the original design review for context. For implementation,
+the later owner directions in
+[the integrated notebook brief](agent-prompts/phase3g-conversation-canvas.md)
+take precedence, including canonical notebook conversations, the continuous
+white mixed stream, overlay composer, inline comments, and removal of the
+Discussion sidebar/header buttons. Consult
+[the validation report](phase3g-validation.md) for current evidence and blockers.
+
 This brief applies the user's approved [requirements](agent-prompts/phase3g-brief.md).
 It retains React, CodeMirror, `useNotebook`, persistence and all backend contracts.
 No Jupyter/Lumino migration, new product service or simulated agent activity.

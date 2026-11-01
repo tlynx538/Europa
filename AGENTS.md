@@ -60,3 +60,25 @@ interrupted work, or validating a milestone. Keep reusable Europa-specific
 prompts in `docs/agent-prompts/`. Record evidence and limitations with each lesson;
 do not turn unverified diagnoses into project rules. General agent instructions
 and resource limits belong in the shared OpenCode setup, not application code.
+
+For autonomous OpenCode work on the notebook UI, first read
+[the current owner directions](docs/agent-prompts/phase3g-conversation-canvas.md),
+[the persistence contract](docs/conversational-notebooks.md), and
+[the latest validation report](docs/phase3g-validation.md). These current owner
+directions supersede earlier sidebar/docking designs. Follow
+[the future agent interaction contract](docs/notebook-agent-interaction.md)
+when planning engine work; it does not authorize starting that milestone.
+
+- On this development machine, use one OpenCode worker and one heavy validation
+  job at a time. Do not recursively spawn agents or run duplicate browser suites.
+- Give work a bounded file scope, tool/time budget, acceptance criteria and a
+  concrete handoff. Diagnose before editing; verify before claiming success.
+- Use Node 24 for frontend checks, single-worker unit/Chrome runs, and zero
+  browser retries. Synchronize on actual saved/settled state, not sleeps or
+  forced clicks. Investigate failures before increasing timeouts.
+- Preserve the user's preview and data. Track services you launch, clean up only
+  verified owned processes after interruption, and verify shutdown. Do not start
+  or restart a preview after the user has requested it stopped.
+- Keep Phase 3G incomplete while required regressions fail. Record the next
+  reproducible investigation in the validation report so another agent can resume
+  without a coordinator. Do not build the real agent engine in this checkpoint.

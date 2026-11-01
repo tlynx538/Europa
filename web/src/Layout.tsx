@@ -16,9 +16,8 @@ export function StatusSlot({ children }: { children: ReactNode }) {
 const storedWidth = (side: string, fallback: number) => Math.max(220, Math.min(480, Number(localStorage.getItem(`europa.width.${side}`)) || fallback))
 
 export function CommentIndicator({ cell, count }: { cell: string; count: number }) {
-  const { setRight } = useContext(Panels)
   return <a href="#discussion" onClick={event => {
-    event.preventDefault(); setRight(true)
+    event.preventDefault()
     requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-comment-cell="${CSS.escape(cell)}"]`)?.focus())
   }}>{count} comments</a>
 }
@@ -40,21 +39,21 @@ export function Layout({ children }: { children: ReactNode }) {
   }, [])
   const [mobile, setMobile] = useState(() => matchMedia('(max-width: 1100px)').matches)
   const [left, setLeft] = useState(() => !mobile && localStorage.getItem('europa.panel.left') === 'true')
-  const [right, setRight] = useState(() => !mobile && localStorage.getItem('europa.panel.right') === 'true')
+  const right = false
+  const setRight = (value: boolean) => { if (value) document.querySelector<HTMLTextAreaElement>('.message-composer textarea')?.focus() }
   const [settingsOpen, setSettingsOpen] = useState(false)
   const openSettings = () => { if (mobile) { setLeft(false); setRight(false) } setSettingsOpen(true) }
   const closeSettings = () => setSettingsOpen(false)
   const [leftWidth, setLeftWidth] = useState(() => storedWidth('left', 270))
-  const [rightWidth, setRightWidth] = useState(() => storedWidth('right', 310))
   useEffect(() => {
     const query = matchMedia('(max-width: 1100px)')
-    const change = () => { setMobile(query.matches); setLeft(!query.matches && localStorage.getItem('europa.panel.left') === 'true'); setRight(!query.matches && localStorage.getItem('europa.panel.right') === 'true') }
+    const change = () => { setMobile(query.matches); setLeft(!query.matches && localStorage.getItem('europa.panel.left') === 'true') }
     query.addEventListener('change', change); return () => query.removeEventListener('change', change)
   }, [])
-  useEffect(() => { if (!mobile) { localStorage.setItem('europa.panel.left', String(left)); localStorage.setItem('europa.panel.right', String(right)) } }, [left, right, mobile])
+  useEffect(() => { if (!mobile) localStorage.setItem('europa.panel.left', String(left)) }, [left, mobile])
   const resize = (side: 'left' | 'right', value: number) => {
     const width = Math.max(220, Math.min(480, value))
-    if (side === 'left') setLeftWidth(width); else setRightWidth(width)
+    if (side === 'left') setLeftWidth(width)
     localStorage.setItem(`europa.width.${side}`, String(width))
   }
   const handle = (side: 'left' | 'right', value: number) => <div className={`splitter splitter-${side}`} role="separator" aria-label={`Resize ${side} sidebar`} aria-orientation="vertical" aria-valuenow={value} aria-valuemin={220} aria-valuemax={480} tabIndex={0}
@@ -62,9 +61,9 @@ export function Layout({ children }: { children: ReactNode }) {
     onPointerDown={e => { e.currentTarget.setPointerCapture(e.pointerId) }}
     onPointerMove={e => { if (e.currentTarget.hasPointerCapture(e.pointerId)) resize(side, side === 'left' ? e.clientX : innerWidth - e.clientX) }} />
   return <Panels.Provider value={{ left, right, setLeft, setRight, mobile, settingsOpen, openSettings, closeSettings }}><HeaderTarget.Provider value={headerTarget}><StatusTarget.Provider value={statusTarget}>
-    <nav ref={appbar} className="appbar" aria-label="Notebook workspace"><div className="appbar-switchers" ref={setHeaderTarget} /><div className="appbar-controls"><button aria-expanded={left} onClick={() => setLeft(!left)}>Roadmap</button><button aria-expanded={right} onClick={() => setRight(!right)}>Discussion</button></div></nav>
-    <div className="shell" style={{ gridTemplateColumns: `${left ? `minmax(0, ${leftWidth}px) 8px` : '0px 0px'} minmax(0,1fr) ${right ? `8px minmax(0, ${rightWidth}px)` : '0px 0px'}` }}>
-      {children}{!mobile && left && handle('left', leftWidth)}{!mobile && right && handle('right', rightWidth)}
+    <nav ref={appbar} className="appbar" aria-label="Notebook workspace"><div className="appbar-switchers" ref={setHeaderTarget} /></nav>
+    <div className="shell" style={{ gridTemplateColumns: `${left ? `minmax(0, ${leftWidth}px) 8px` : '0px 0px'} minmax(0,1fr) 0px 0px` }}>
+      {children}{!mobile && left && handle('left', leftWidth)}
     </div>
     <div ref={node => { statusbar.current = node; setStatusTarget(node) }} className="global-status" />
   </StatusTarget.Provider></HeaderTarget.Provider></Panels.Provider>
@@ -79,7 +78,9 @@ export function SidePanel({ side, children }: { side: 'left' | 'right'; children
     dialog.close()
     if (open) { if (context.mobile) dialog.showModal(); else dialog.show() }
   }, [open, context.mobile])
-  return <dialog ref={ref} className={`side-panel ${side === 'left' ? 'roadmap-panel' : 'discussion-panel'}`} id={side === 'right' ? 'discussion' : 'roadmap'} aria-label={side === 'left' ? 'Project and roadmap' : 'Discussion'} onCancel={() => change(false)}>
+  return <dialog ref={ref} className={`side-panel ${side === 'left' ? 'roadmap-panel' : 'discussion-panel'}`} id={side === 'right' ? 'discussion' : 'roadmap'} aria-label={side === 'left' ? 'Project and roadmap' : 'Discussion'} onCancel={() => change(false)} onClose={() => {
+    if (context.mobile && side === 'left') requestAnimationFrame(() => Array.from(document.querySelectorAll<HTMLElement>('.notebook-menubar [aria-haspopup=menu]')).find(node => node.textContent === 'View')?.focus())
+  }}>
     <button className="close-panel" onClick={() => change(false)}>Close {side === 'left' ? 'roadmap' : 'discussion'}</button>{children}
   </dialog>
 }

@@ -1,5 +1,5 @@
 export class ApiError extends Error {
-  constructor(public status: number, message: string) { super(message) }
+  constructor(public status: number, message: string, public recoveryNotebookId?: string) { super(message) }
 }
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -12,8 +12,14 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!response.ok) {
     let message = `HTTP ${response.status}`
-    try { const body = await response.json(); message = typeof body.detail === 'string' ? body.detail : message } catch { /* preserve status */ }
-    throw new ApiError(response.status, message)
+    let recoveryNotebookId: string | undefined
+    try {
+      const body = await response.json()
+      const detail = body.detail
+      message = typeof detail === 'string' ? detail : typeof detail?.message === 'string' ? detail.message : message
+      if (response.status === 503 && path === '/notebooks' && init?.method === 'POST' && typeof detail?.notebook_id === 'string' && /^[a-f0-9]{32}$/.test(detail.notebook_id) && detail.recovery === `/api/notebooks/${detail.notebook_id}/conversation`) recoveryNotebookId = detail.notebook_id
+    } catch { /* preserve status */ }
+    throw new ApiError(response.status, message, recoveryNotebookId)
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>

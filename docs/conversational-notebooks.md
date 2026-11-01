@@ -1,5 +1,22 @@
 # Phase 3B: persistent conversational notebook foundation
 
+## Current notebook canvas (frontend)
+
+Cell Comment and thread Reply open focused, multiline inline editors beneath the
+cell or within its existing thread. Drafts are stored locally by notebook, project,
+cell and parent; cancelling or a failed/unknown response retains the draft. A
+successful matching response or exact pending-operation replay clears only the
+matching text. Missing, unsaved, conflicted or changed cell context blocks new
+posts without moving a draft to another cell. Comments/replies display persisted
+server-assigned author roles, timestamps and anchor status; no automatic agent
+replies are generated. A future engine may persist real agent-authored turns,
+as described in [notebook-agent-interaction.md](notebook-agent-interaction.md).
+This local draft storage is browser-local, not cross-device synchronization.
+Replies to historical outdated/orphaned threads remain possible using the
+original parent anchor, even when the cell is gone; new root comments require a
+reviewed saved-cell revision. A changed root draft can explicitly adopt the
+current saved state of that *same* cell without losing its text.
+
 Based on Phase 3A commit `a5f715d970f4ba7ab9497a51d675c7d0ae28c40c`;
 branch `feature/conversational-notebooks`. Implementation commit is in Git history
 and the completion report. Read the [mandatory safety review](phase3b-safety-review.md)
@@ -25,7 +42,7 @@ application mutex, then SQLite transaction. Worker threads keep file/DB work off
 the event loop. There are no locks held through Gateway execution. SQLite's
 ordinary committed/uncommitted WAL recovery handles process interruption.
 
-Schema migration is transactional, `PRAGMA user_version: 0 -> 1`. Unknown versions
+Schema migration is transactional, `PRAGMA user_version: 0/1/2 -> 3`. Unknown versions
 fail closed. Integrity and foreign-key checks run on open. Tables:
 
 | Table | Purpose |
@@ -35,6 +52,7 @@ fail closed. Integrity and foreign-key checks run on open. Tables:
 | `memberships` | One current project per notebook; association/disassociation flag |
 | `versions` | Immutable roadmap snapshots, primary key `(roadmap_id, revision)` |
 | `operations` | Global operation ID, request fingerprint, original committed response |
+| `canonical_message_placements` | One-time layout snapshot for active canonical messages created before placement existed; original records remain immutable |
 
 Record kinds are project, conversation, message, roadmap, comment and activity.
 Project/notebook/parent identity columns have SQL foreign keys. Task graphs,
@@ -55,9 +73,9 @@ presence. **There is no claimed atomic transaction across SQLite and files.**
 Application operations never create/delete/edit `.ipynb` files; membership is
 entirely in SQLite. Do not edit/delete managed files externally while Europa runs.
 
-Assign existing notebooks with the membership API below. New notebooks use the
-unchanged `POST /api/notebooks` then the same association call. A disconnect
-between those two requests leaves a safe standalone notebook. To change projects,
+Assign existing notebooks with the membership API below. New notebooks use
+`POST /api/notebooks`, which saves the normal `.ipynb` first and initializes its
+one canonical notebook-owned conversation. To change projects,
 explicitly disassociate then associate; history keeps its original project scope.
 An existing notebook ID and its outputs never change as a side effect.
 
@@ -81,6 +99,24 @@ observation; GET retrieves current state. Reusing an ID for a different request,
 resource or server author returns 409. Operations and their replay records commit
 in one transaction; there are no success replay records for rolled-back writes.
 Operation history is retained without age-based pruning.
+
+Canonical notebook messages now include server-assigned `data.placement_after_cell_id`:
+the ID of the last saved notebook cell when the message commits, or JSON `null`
+when the notebook has no cells. It is immutable, distinct from the optional
+`data.cell_id` cell-context link, and preserved by exact operation replay.
+The notebook's saved cell order drives traversal; messages in each placement
+slot follow persisted message order. Deleting an anchor leaves its message in a
+labelled historical group rather than changing its reference. On first canonical
+conversation GET, message-list GET, or append, existing unplaced messages in that
+active conversation receive a durable *layout snapshot* after the last saved
+cell (or `null` before the first cell). This mapping is stored separately; their
+original message JSON, IDs, authorship, timestamps and operation responses are
+unchanged. The snapshot is the first observed notebook layout, **not** recovered
+message creation chronology. It does not move on later cell insertion or reload.
+Historical noncanonical read-only threads are never adopted. Placement does not
+establish precise chronology after cell reorder, nor across pre-existing
+messages, cell execution, and unsaved drafts. Chat does not edit
+`.ipynb` or execute cells.
 
 Mutable resources require the exact integer `revision`; messages/activity are
 append-only. Record envelope:
@@ -118,7 +154,9 @@ public summaries. No runtime diagnostics or outputs are copied into activity.
 | `DELETE /projects/{id}` | JSON `operation_id,revision`; 200 tombstone record |
 | `GET /projects/{id}/notebooks` | Membership list with notebook ID and presence flag |
 | `POST /projects/{id}/notebooks` | `operation_id,revision,notebook_id,associated` (default true); updated project |
-| `POST /conversations` | `operation_id,project_id,notebook_id?,title?`; 201 |
+| `POST /conversations` | `operation_id,project_id,title?` for project-only threads; 201 (notebook_id returns 409) |
+| `GET /notebooks/{id}/conversation` | Idempotent notebook-scoped canonical ensure; 200 record |
+| `GET /notebooks/{id}/legacy-conversations` | Paginated, read-only exact-notebook history |
 | `GET /conversations?project_id=...`, `GET /conversations/{id}` | Paginated list / record |
 | `POST /conversations/{id}/messages` | `operation_id,content,parent_id?,state?` plus optional links; 201 |
 | `GET /conversations/{id}/messages` | Ordered paginated history |
@@ -223,8 +261,7 @@ curl -s http://127.0.0.1:8000/api/notebooks -H 'Content-Type: application/json' 
   -d '{"title":"Sales"}'
 curl -s http://127.0.0.1:8000/api/projects/PROJECT/notebooks -H 'Content-Type: application/json' \
   -d '{"operation_id":"associate-1","revision":1,"notebook_id":"NOTEBOOK"}'
-curl -s http://127.0.0.1:8000/api/conversations -H 'Content-Type: application/json' \
-  -d '{"operation_id":"conversation-1","project_id":"PROJECT","notebook_id":"NOTEBOOK"}'
+curl -s http://127.0.0.1:8000/api/notebooks/NOTEBOOK/conversation
 curl -s http://127.0.0.1:8000/api/conversations/CONVERSATION/messages -H 'Content-Type: application/json' \
   -d '{"operation_id":"message-1","content":"Compare regional totals","state":"published"}'
 curl -s http://127.0.0.1:8000/api/roadmaps -H 'Content-Type: application/json' \
@@ -245,6 +282,45 @@ curl -s -X DELETE http://127.0.0.1:8000/api/projects/PROJECT -H 'Content-Type: a
 No Python executes in this workflow unless the separate existing notebook execute
 endpoint is explicitly called. Application records do not act as execution queues.
 
+## Notebook-owned canonical conversation (introduced in schema v2)
+
+`GET /api/notebooks/{id}/conversation` verifies the saved notebook and atomically
+gets or creates its one canonical conversation (a normal `Record` with
+`project_id:null`, `notebook_id:id`). It is safe to retry after a lost response,
+on every reopen, and after a server restart; concurrent callers get the same ID.
+Normal `GET /api/notebooks/{id}` continues to return only the standard notebook
+document, even if application SQLite is temporarily unavailable. New notebook
+creation initializes the mapping after the file is saved and the catalog is
+reconciled. A successful `POST /api/notebooks` returns its original document shape;
+then GET the canonical endpoint to obtain the conversation ID. If initialization
+fails, POST returns HTTP 503 with `detail: {message, notebook_id, recovery}`;
+the notebook file is **not** removed. Open `GET /api/notebooks/{notebook_id}`
+and retry `GET` at the `recovery` path. Do **not** repeat POST: it creates a
+different notebook. A failed ensure never returns an invented conversation ID.
+
+`POST /api/conversations/{conversation_id}/messages` and its paginated GET work
+for the canonical record without a project; public POST accepts only server-assigned
+`author_role:user`. Messages, parent references, linked messages, cells, document
+revisions and receipts are checked against the saved notebook and conversation
+scope. Existing project task/evidence links require matching current membership.
+Project-only `POST /api/conversations` remains supported; notebook-scoped generic
+creation now returns 409. Canonical membership identity does not change when a
+project is reassigned, archived or deleted. The v1→v3 transactional migration
+rebuilds the constrained records table while preserving record identities, order,
+revisions, data, operations, snapshots, FKs, indexes and append-only triggers.
+Only notebook-owned conversations and messages may omit a project ID. Existing v2
+databases acquire the separate placement table transactionally on upgrade to v3.
+
+Pre-existing books receive a **fresh** canonical conversation; historical
+project conversations are never guessed, adopted, merged, deleted or relabeled.
+`GET /api/notebooks/{id}/legacy-conversations?after=0&limit=50` lists only
+noncanonical conversations whose recorded notebook ID matches exactly. Their
+messages remain readable through the existing conversation message GET; append to
+historical notebook-scoped threads returns 409. Project-
+only history remains in project context. This history listing is read-only; it
+does not create parallel threads. Old project-scoped historical records remain
+accessible by their IDs, even if notebook cells have since been deleted.
+
 ## Limits and next milestone
 
 Histories, operation responses and receipts currently grow without aggregate disk
@@ -260,3 +336,28 @@ Recommended next milestone: owner-facing notebook/sidebar UI against these APIs,
 with sanitized output rendering, explicit review controls and stale-anchor UX.
 Keep agent orchestration separate until trusted authorship, Coordinator acceptance
 and scoped dataset transfer have their own reviewed contracts.
+
+## Phase 3G notebook UI integration (local candidate)
+
+The notebook canvas fetches its canonical thread using `GET /api/notebooks/{id}/conversation`, independently of project membership. Messages use that ID and the existing paginated message endpoint; legacy exact-notebook threads are separately labeled read-only in the notebook, and project conversations remain read-only in Project Detail. No agent replies are generated by this UI. Drafts are keyed by notebook plus canonical conversation; when exactly one older draft exists for the same notebook, it is copied with its original key retained until an acknowledged matching send. Canonical GET errors expose a retry rather than creating another notebook. A notebook create 503 with the structured saved notebook ID opens the existing document; it does not repeat the create POST.
+
+## Inline cell comment editor
+
+The notebook UI opens a multiline editor beneath the target cell or inside the
+existing comment thread, without a native JavaScript prompt. Comment cards use a
+readable bounded width, a modest minimum height and separated actions; the inline
+editor has a taller textarea. Cards show the cell anchor, actual author, compact time,
+resolution state and replies. Existing outdated/orphaned anchors remain visible;
+replies inherit the original historical thread anchor rather than retargeting
+current source. New root comments submit the reviewed document revision.
+
+Drafts are scoped by notebook, project, cell and parent comment. Cancel, failed
+requests and unknown outcomes retain them; successful acknowledgement clears only
+the matching content. The existing exact-operation retry also reconciles that
+scoped draft. A changed saved-cell context requires explicit review before a new
+root comment is posted. The inline textarea does not run notebook shortcuts.
+
+The public comment endpoint still assigns user authorship. The UI can display
+persisted author roles, but automatic agent replies and trusted engine writes are
+part of the next milestone's implementation, not a capability generated by this
+editor. See [the agent turn contract](notebook-agent-interaction.md).

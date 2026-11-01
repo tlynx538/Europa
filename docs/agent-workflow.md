@@ -132,3 +132,37 @@ for the full unit suite use `npm test -- --maxWorkers=1`.
 Workspace loads project choices before selected-project metadata. A project name
 in an option does not establish readiness; wait for the selected membership or
 metadata that the test actually asserts.
+
+When adding optional persisted message fields, verify the actual HTTP response for
+both historical and new records. FastAPI/Pydantic response serialization can add
+defaults that a direct store test never sees. An absent legacy placement and an
+explicit null placement before the first cell have different meanings; preserve
+that distinction without broadly removing existing null fields.
+
+For floating notebook UI, verify the scroller, overlay and footer together. Use
+the measured overlay height once for bottom scroll clearance, inspect the last
+content at maximum scroll, and test a fresh narrow viewport as well as resizing.
+A white form on a gray dock does not establish a continuous notebook page.
+
+Keep shell paths relative to the command's actual working directory: from `web/`,
+use `browser/...` and `src/...`, not `web/browser/...`. A failed edit caused by the
+wrong directory is not evidence that the intended fix was tested.
+
+When supervising reused OpenCode sessions, separate the current turn's handoff
+from historical replies and retain exact log names/counts. Budget application
+reads, edits and test commands; reserve internal workspace bookkeeping so a
+completed check is not interrupted solely while recording its handoff. Preserve
+the raw tool count and any budget overrun as performance evidence. An agent's
+successful outcome still does not establish passing behavioral tests.
+
+Interrupting an OpenCode tool does not prove its browser-test subprocesses have
+exited. One interrupted run left its disposable API listening after the runner
+stopped. Verify process ownership using the exact test port and private notebook
+root; interrupt the owned runner and gracefully stop only its remaining API or
+headless browser, then verify process exit. Preserve the user preview and Gateway
+ownership boundaries. Never use process-name-wide cleanup.
+
+Prefer delivering review findings in an owned follow-up at a worker's handoff.
+If a requirement changes during a run, explicitly supervise the interrupted run
+and its child services before starting its replacement. A late session prompt
+must not start generation after its original supervisor has exited.

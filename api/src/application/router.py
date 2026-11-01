@@ -12,6 +12,16 @@ Limit = Annotated[int, Query(ge=1, le=100)]
 def store(request): return request.app.state.application_store
 
 
+@router.get('/notebooks/{notebook}/conversation', response_model=m.Record)
+async def notebook_conversation(notebook: str, request: Request):
+    return await asyncio.to_thread(store(request).ensure_notebook_conversation, notebook)
+
+
+@router.get('/notebooks/{notebook}/legacy-conversations', response_model=m.Page)
+async def legacy_notebook_conversations(notebook: str, request: Request, after: Cursor = 0, limit: Limit = 50):
+    return await asyncio.to_thread(store(request).legacy_notebook_conversations, notebook, after=after, limit=limit)
+
+
 @router.post('/projects', status_code=201, response_model=m.Record)
 async def project_create(request: Request, body: m.ProjectCreate):
     return await asyncio.to_thread(store(request).project_create, body)
@@ -68,7 +78,7 @@ async def message_append(conversation: str, request: Request, body: m.MessageCre
     return await asyncio.to_thread(store(request).message_append, conversation, body)
 
 
-@router.get('/conversations/{conversation}/messages', response_model=m.Page)
+@router.get('/conversations/{conversation}/messages', response_model=m.Page, response_model_exclude_unset=True)
 async def messages(conversation: str, request: Request, after: Cursor = 0, limit: Limit = 50):
     return await asyncio.to_thread(store(request).listing, 'message', parent=conversation, after=after, limit=limit)
 

@@ -11,9 +11,16 @@ Detailed implementation contracts and validation evidence remain in `docs/`.
 - Fixed full-width notebook header and status footer, with project/notebook
   navigation and guarded Open/Close commands in File.
 - Keyboard-accessible compact menus, theme submenu and shortcut dialog.
-- Task-focused roadmap, compact discussion with readable cell references, and
-  separated notebook/project row actions.
+- Left roadmap outline with ordered task progress, and separated notebook/project
+  row actions.
+- One persisted conversation per notebook, automatically initialized and restored,
+  with inline messages, explicit cell references and a floating composer. Historical
+  conversations remain accessible without merging them into the active thread.
+- Recover a saved notebook after conversation initialization fails without creating
+  another notebook. Agent orchestration remains a later milestone.
 - Project settings in File, presented in a modal over a dark blurred backdrop.
+- Compact cell action menus with outside-click dismissal, visible move arrows,
+  and inline comment/reply editors with readable thread spacing.
 - Persisted project Activity timeline with timestamps and useful empty navigation.
 
 See [Phase 3G validation](docs/phase3g-validation.md) for candidate status,

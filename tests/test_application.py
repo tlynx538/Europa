@@ -14,7 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from application import models as m
-from application.store import ApplicationStore, ApplicationError
+from application.store import ApplicationStore, ApplicationError, SCHEMA
 from notebooks.store import NotebookStore, NotebookError, source_hash
 
 
@@ -42,7 +42,248 @@ def member(app, nb, project_id=None):
 
 
 def conversation(app, p, notebook=None):
+    if notebook is not None: return app.ensure_notebook_conversation(notebook)
     return app.conversation_create(m.ConversationCreate(operation_id=op(), project_id=p['id'], notebook_id=notebook))
+
+
+def test_canonical_ensure_is_unique_durable_and_independent_of_membership(state, tmp_path):
+    app, nb = state
+    nid = nb.create()['metadata']['europa']['notebook_id']
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        records = list(pool.map(app.ensure_notebook_conversation, [nid] * 12))
+    assert len({record['id'] for record in records}) == 1
+    canonical = records[0]
+    assert canonical['project_id'] is None and canonical['notebook_id'] == nid
+    p = project(app)
+    app.membership(p['id'], m.Membership(operation_id=op(), revision=1, notebook_id=nid))
+    app.membership(p['id'], m.Membership(operation_id=op(), revision=2, notebook_id=nid, associated=False))
+    app.close(); app.__init__(tmp_path / 'application', nb)
+    assert app.ensure_notebook_conversation(nid) == canonical
+
+
+def test_canonical_message_scoping_and_project_evidence(state):
+    app, nb = state
+    a, b = [nb.create()['metadata']['europa']['notebook_id'] for _ in range(2)]
+    ca, cb = [app.ensure_notebook_conversation(nid) for nid in (a, b)]
+    msg = app.message_append(ca['id'], m.MessageCreate(operation_id=op(), content='safe'))
+    foreign = app.message_append(cb['id'], m.MessageCreate(operation_id=op(), content='other'))
+    for fields in ({'notebook_id': b}, {'message_id': foreign['id']}, {'parent_id': foreign['id']},
+                   {'cell_id': 'missing'}, {'document_revision': 999}):
+        with pytest.raises(NotebookError):
+            app.message_append(ca['id'], m.MessageCreate(operation_id=op(), content='invalid', **fields))
+    assert msg['notebook_id'] == a
+    p = project(app)
+    app.membership(p['id'], m.Membership(operation_id=op(), revision=1, notebook_id=a))
+    r = roadmap(app, p, [task('ok', status='completed', accepted=True,
+        evidence=[m.Evidence(summary='Reviewed', message_id=msg['id'])])], a)
+    assert r['data']['progress'] == 100
+    with pytest.raises(ApplicationError):
+        roadmap(app, p, [task('bad', status='completed', accepted=True,
+            evidence=[m.Evidence(summary='Wrong notebook', message_id=foreign['id'])])], a)
+
+
+def test_canonical_message_placement_tracks_saved_cells_not_context_and_survives_restart(state, tmp_path):
+    app, nb = state
+    nid = nb.create()['metadata']['europa']['notebook_id']
+    c = app.ensure_notebook_conversation(nid)
+    first = app.message_append(c['id'], m.MessageCreate(operation_id=op(), content='before cells'))
+    assert first['data']['placement_after_cell_id'] is None
+    doc = nb.edit_cell(nid, 1, 'insert', text='one')
+    a = doc['cells'][0]['id']
+    second = app.message_append(c['id'], m.MessageCreate(operation_id=op(), content='after first'))
+    doc = nb.edit_cell(nid, doc['metadata']['europa']['revision'], 'insert', text='two')
+    b = doc['cells'][-1]['id']
+    body = m.MessageCreate(operation_id=op(), content='after second with first as context', cell_id=a,
+                           document_revision=doc['metadata']['europa']['revision'])
+    third = app.message_append(c['id'], body)
+    assert [r['data']['placement_after_cell_id'] for r in (first, second, third)] == [None, a, b]
+    assert third['data']['cell_id'] == a and third['data']['author_role'] == 'user'
+    nb.edit_cell(nid, doc['metadata']['europa']['revision'], 'insert', text='three')
+    before_retry = (tmp_path / 'documents' / (nid + '.ipynb')).read_bytes()
+    assert app.message_append(c['id'], body) == third
+    assert len(app.listing('message', parent=c['id'])['items']) == 3
+    saved = nb.open(nid)
+    saved['cells'][1]['outputs'] = [nbformat.v4.new_output('stream', name='stdout', text='persisted\n')]
+    saved = nb.save(nid, saved['metadata']['europa']['revision'], saved)
+    moved = nb.edit_cell(nid, saved['metadata']['europa']['revision'], 'move', b, index=0)
+    assert [cell['id'] for cell in moved['cells']] == [b, a, moved['cells'][2]['id']]
+    assert moved['cells'][0]['outputs'][0]['text'] == 'persisted\n'
+    assert third['data']['cell_id'] == a and third['data']['placement_after_cell_id'] == b
+    before_retry = (tmp_path / 'documents' / (nid + '.ipynb')).read_bytes()
+    app.close(); app.__init__(tmp_path / 'application', nb)
+    assert [r['data']['placement_after_cell_id'] for r in app.listing('message', parent=c['id'])['items']] == [None, a, b]
+    assert app.message_append(c['id'], body) == third
+    assert before_retry == (tmp_path / 'documents' / (nid + '.ipynb')).read_bytes()
+
+
+async def test_message_http_adopts_unplaced_canonical_without_rewriting_records(state, tmp_path):
+    import httpx
+    from main import create_app
+    app, nb = state
+    nid = nb.create()['metadata']['europa']['notebook_id']
+    original = nb.edit_cell(nid, 1, 'insert', text='first')
+    first_cell = original['cells'][0]['id']
+    c = app.ensure_notebook_conversation(nid)
+    with app.transaction():
+        old_data = m.MessageCreate(operation_id=op(), content='old').model_dump(exclude={'operation_id'})
+        old = app._insert('message', None, nid, {**old_data, 'conversation_id': c['id'], 'author_role': 'user'}, c['id'])
+        raw = app.db.execute('SELECT data,created_at,updated_at FROM records WHERE id=?', (old['id'],)).fetchone()
+    server = create_app(); server.state.application_store = app; server.state.notebook_store = nb
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server), base_url='http://europa') as http:
+        assert (await http.get(f'/api/notebooks/{nid}/conversation')).status_code == 200
+        records = (await http.get(f"/api/conversations/{c['id']}/messages")).json()['items']
+        assert records[0]['id'] == old['id'] and records[0]['data']['placement_after_cell_id'] == first_cell
+        assert records[0]['created_at'] == old['created_at'] and records[0]['data']['author_role'] == 'user'
+        appended = nb.edit_cell(nid, original['metadata']['europa']['revision'], 'insert', text='later')
+        second_cell = appended['cells'][1]['id']
+        assert (await http.get(f"/api/conversations/{c['id']}/messages")).json()['items'][0]['data']['placement_after_cell_id'] == first_cell
+        new = await http.post(f"/api/conversations/{c['id']}/messages", json={'operation_id': op(), 'content': 'new'})
+        assert new.status_code == 201 and new.json()['data']['placement_after_cell_id'] == second_cell
+        records = (await http.get(f"/api/conversations/{c['id']}/messages")).json()['items']
+        assert [record['data']['placement_after_cell_id'] for record in records] == [first_cell, second_cell]
+        forged = await http.post(f"/api/conversations/{c['id']}/messages", json={
+            'operation_id': op(), 'content': 'forged', 'placement_after_cell_id': 'fake'})
+        assert forged.status_code == 422
+    with app.transaction():
+        assert app.db.execute('SELECT data,created_at,updated_at FROM records WHERE id=?', (old['id'],)).fetchone() == raw
+    app.close(); app.__init__(tmp_path / 'application', nb)
+    assert app.listing('message', parent=c['id'])['items'][0]['data']['placement_after_cell_id'] == first_cell
+
+
+def test_unplaced_message_adopts_empty_notebook_once_and_exact_retry_keeps_slot(state):
+    app, nb = state
+    nid = nb.create()['metadata']['europa']['notebook_id']
+    c = app.ensure_notebook_conversation(nid)
+    with app.transaction():
+        data = m.MessageCreate(operation_id=op(), content='here').model_dump(exclude={'operation_id'})
+        old = app._insert('message', None, nid, {**data, 'conversation_id': c['id'], 'author_role': 'coordinator'}, c['id'])
+    assert app.ensure_notebook_conversation(nid)['id'] == c['id']
+    first = nb.edit_cell(nid, 1, 'insert', text='first')['cells'][0]['id']
+    adopted = app.listing('message', parent=c['id'])['items'][0]
+    assert adopted['data']['placement_after_cell_id'] is None and adopted['data']['author_role'] == 'coordinator'
+    assert adopted['created_at'] == old['created_at']
+    body = m.MessageCreate(operation_id=op(), content='next', cell_id=first)
+    sent = app.message_append(c['id'], body)
+    nb.edit_cell(nid, 2, 'insert', text='second')
+    assert app.message_append(c['id'], body) == sent
+    assert [x['data']['placement_after_cell_id'] for x in app.listing('message', parent=c['id'])['items']] == [None, first]
+    assert len(app.listing('message', parent=c['id'])['items']) == 2
+
+
+async def test_canonical_http_create_recovery_and_legacy_history(state, monkeypatch):
+    import httpx
+    from main import create_app
+    app, nb = state
+    server = create_app(); server.state.application_store = app; server.state.notebook_store = nb
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server), base_url='http://europa') as http:
+        original = app.ensure_notebook_conversation
+        def fail(_): raise ApplicationError('Application storage transaction failed', 503)
+        monkeypatch.setattr(app, 'ensure_notebook_conversation', fail)
+        failure = await http.post('/api/notebooks', json={'title': 'Recovered'})
+        nid = failure.json()['detail']['notebook_id']
+        assert failure.status_code == 503 and nb.open(nid)
+        assert (await http.get('/api/notebooks/' + nid)).status_code == 200
+        monkeypatch.setattr(app, 'ensure_notebook_conversation', original)
+        p = (await http.post('/api/projects', json={'operation_id': op(), 'title': 'History'})).json()
+        member = await http.post(f"/api/projects/{p['id']}/notebooks", json={'operation_id': op(), 'revision': 1, 'notebook_id': nid})
+        assert member.status_code == 200
+        # A legacy scoped row is created by an older schema, not public ingress today.
+        with app.transaction():
+            legacy = app._insert('conversation', p['id'], nid, {'title': 'Earlier discussion'})
+        assert (await http.post(f"/api/conversations/{legacy['id']}/messages", json={
+            'operation_id': op(), 'content': 'Must remain historical'})).status_code == 409
+        canonical = (await http.get(f'/api/notebooks/{nid}/conversation')).json()
+        assert canonical['id'] == (await http.get(f'/api/notebooks/{nid}/conversation')).json()['id']
+        assert legacy['id'] != canonical['id']
+        assert (await http.post('/api/conversations', json={'operation_id': op(), 'project_id': p['id'], 'notebook_id': nid})).status_code == 409
+        assert (await http.get(f'/api/notebooks/{nid}/legacy-conversations')).json()['items'][0]['id'] == legacy['id']
+        assert (await http.post(f"/api/conversations/{canonical['id']}/messages", json={'operation_id': op(), 'content': 'spoof', 'author_role': 'system/tool'})).status_code == 422
+
+
+def test_v1_migration_preserves_legacy_records_and_integrity(tmp_path):
+    nb = NotebookStore(tmp_path / 'docs')
+    nid = nb.create()['metadata']['europa']['notebook_id']
+    root = tmp_path / 'app'; root.mkdir(mode=0o700)
+    path = root / 'application.sqlite3'
+    db = sqlite3.connect(path)
+    legacy_check = "(kind='project' AND project_id IS NULL AND notebook_id IS NULL) OR\n              (kind!='project' AND project_id IS NOT NULL)"
+    schema = [statement for statement in SCHEMA if 'canonical_notebook_conversations' not in statement and 'canonical_message_placements' not in statement]
+    schema[1] = schema[1].replace(
+        "(kind='project' AND project_id IS NULL AND notebook_id IS NULL) OR\n              (kind IN ('conversation','message') AND project_id IS NULL AND notebook_id IS NOT NULL) OR\n              (kind!='project' AND project_id IS NOT NULL)", legacy_check)
+    for statement in schema: db.execute(statement)
+    db.execute('INSERT INTO catalog VALUES (?,1)', (nid,))
+    now = 12345.5
+    for i, (identity, kind, parent, data) in enumerate([
+            ('p', 'project', None, {'title':'Historical', 'description':None, 'status':'active', 'file_references':[]}),
+            ('a', 'conversation', None, {'title':'First'}),
+            ('b', 'conversation', None, {'title':'Second'}),
+            ('m', 'message', 'a', {'content':'old', 'conversation_id':'a', 'author_role':'user'}),
+            ('r', 'roadmap', None, {'objective':'Old plan', 'tasks':[]})], 1):
+        db.execute('INSERT INTO records VALUES (?,?,?,?,?,?,?,?,?,?)',
+                   (i, identity, kind, None if kind == 'project' else 'p',
+                    None if kind == 'project' else nid, parent, 2, now, now, json.dumps(data)))
+    db.execute('INSERT INTO memberships VALUES (?,?,1)', (nid,'p'))
+    db.execute('INSERT INTO versions VALUES (?,?,?,?)', ('r',2,now,json.dumps({'objective':'Old plan','tasks':[]})))
+    db.execute('INSERT INTO operations VALUES (?,?,?)', ('old-op','digest',json.dumps({'id':'m'})))
+    db.execute('PRAGMA user_version=1'); db.commit(); db.close(); path.chmod(0o600)
+    app = ApplicationStore(root, nb)
+    try:
+        canonical = app.ensure_notebook_conversation(nid)
+        assert canonical['id'] not in {'a','b'}
+        assert [r['id'] for r in app.legacy_notebook_conversations(nid)['items']] == ['a','b']
+        with app.transaction():
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 3
+            assert not app.db.execute('PRAGMA foreign_key_check').fetchall()
+            assert app.db.execute('SELECT response FROM operations WHERE id=?', ('old-op',)).fetchone()[0] == '{"id": "m"}'
+            assert app.db.execute('SELECT data FROM versions WHERE roadmap_id=?', ('r',)).fetchone()[0] == '{"objective": "Old plan", "tasks": []}'
+            assert [(r['id'],r['sequence'],r['revision'],r['created_at'],r['data']) for r in app.db.execute('SELECT * FROM records WHERE sequence<=5')] == [
+                (identity,i,2,now,json.dumps(data)) for i,(identity,kind,parent,data) in enumerate([
+                    ('p','project',None,{'title':'Historical','description':None,'status':'active','file_references':[]}),
+                    ('a','conversation',None,{'title':'First'}),('b','conversation',None,{'title':'Second'}),
+                    ('m','message','a',{'content':'old','conversation_id':'a','author_role':'user'}),
+                    ('r','roadmap',None,{'objective':'Old plan','tasks':[]})],1)]
+        with pytest.raises(sqlite3.IntegrityError):
+            with app.transaction(): app.db.execute("UPDATE records SET data='{}' WHERE id='m'")
+        with pytest.raises(sqlite3.IntegrityError):
+            with app.transaction(): app.db.execute("INSERT INTO records(id,kind,revision,created_at,updated_at,data) VALUES ('bad','roadmap',1,0,0,'{}')")
+    finally:
+        app.close(); nb.close()
+
+
+def test_v2_upgrade_preserves_records_operations_and_snapshots_only_canonical(tmp_path):
+    nb = NotebookStore(tmp_path / 'docs')
+    nid = nb.create()['metadata']['europa']['notebook_id']
+    doc = nb.edit_cell(nid, 1, 'insert', text='saved')
+    anchor = doc['cells'][0]['id']
+    app = ApplicationStore(tmp_path / 'app', nb)
+    c = app.ensure_notebook_conversation(nid)
+    p = project(app)
+    with app.transaction():
+        legacy = app._insert('conversation', p['id'], nid, {'title': 'Historical'})
+        data = m.MessageCreate(operation_id=op(), content='old').model_dump(exclude={'operation_id'})
+        old = app._insert('message', None, nid, {**data, 'conversation_id': c['id'], 'author_role': 'user'}, c['id'])
+        historical = app._insert('message', p['id'], nid, {**data, 'conversation_id': legacy['id'], 'author_role': 'user'}, legacy['id'])
+        raw = app.db.execute('SELECT * FROM records WHERE id=?', (old['id'],)).fetchone()
+    sent_body = m.MessageCreate(operation_id=op(), content='new')
+    sent = app.message_append(c['id'], sent_body)
+    app.close()
+    db = sqlite3.connect(tmp_path / 'app' / 'application.sqlite3')
+    db.execute('DROP TABLE canonical_message_placements')
+    db.execute('PRAGMA user_version=2'); db.commit(); db.close()
+    app = ApplicationStore(tmp_path / 'app', nb)
+    try:
+        with app.transaction():
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 3
+            assert not app.db.execute('PRAGMA foreign_key_check').fetchall()
+            assert app.db.execute('SELECT * FROM records WHERE id=?', (old['id'],)).fetchone() == raw
+        assert app.listing('message', parent=c['id'])['items'][0]['data']['placement_after_cell_id'] == anchor
+        assert 'placement_after_cell_id' not in app.listing('message', parent=legacy['id'])['items'][0]['data']
+        assert historical['id'] != old['id']
+        assert app.message_append(c['id'], sent_body) == sent
+        with pytest.raises(sqlite3.IntegrityError):
+            with app.transaction(): app.db.execute("UPDATE records SET data='{}' WHERE id=?", (old['id'],))
+    finally:
+        app.close(); nb.close()
 
 
 def task(identity='step', **kwargs):
@@ -411,7 +652,9 @@ def test_task_identity_cannot_be_reused_in_another_roadmap_history(state):
 
 
 def test_deleted_project_can_explicitly_release_membership_without_losing_history(state):
-    app,nb=state; p,doc=member(app,nb); nid=doc['metadata']['europa']['notebook_id']; c=conversation(app,p,nid)
+    app,nb=state; p,doc=member(app,nb); nid=doc['metadata']['europa']['notebook_id']
+    with app.transaction():
+        c=app._insert('conversation',p['id'],nid,{'title':'Legacy project history'})
     deleted=app.project_delete(p['id'],m.Revision(operation_id=op(),revision=2))
     app.membership(p['id'],m.Membership(operation_id=op(),revision=deleted['revision'],notebook_id=nid,associated=False))
     other=project(app)

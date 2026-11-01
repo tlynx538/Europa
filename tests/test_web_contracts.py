@@ -8,6 +8,7 @@ import pytest
 
 import main
 from main import create_app
+from application.store import ApplicationStore
 from notebooks.service import NotebookService
 from notebooks.store import NotebookError, NotebookStore
 from test_notebooks import code_notebook, nbid, rev, result
@@ -18,8 +19,11 @@ def browser_app(tmp_path):
     store = NotebookStore(tmp_path / 'documents')
     app = create_app()
     app.state.notebook_store = store
+    application = ApplicationStore(tmp_path / 'application', store)
+    app.state.application_store = application
     app.state.supervisor = SimpleNamespace(notebooks={})
     yield app, store
+    application.close()
     store.close()
 
 
