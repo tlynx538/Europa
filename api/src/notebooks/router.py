@@ -2,7 +2,7 @@
 import asyncio
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 router = APIRouter(prefix='/notebooks')
@@ -56,7 +56,17 @@ def store(request): return request.app.state.notebook_store
 
 @router.post('', status_code=201)
 async def create(request: Request, body: Create):
-    return await asyncio.to_thread(store(request).create, body.title)
+    document = await asyncio.to_thread(store(request).create, body.title)
+    notebook_id = document['metadata']['europa']['notebook_id']
+    from application.store import ApplicationError
+    try:
+        await asyncio.to_thread(request.app.state.application_store.ensure_notebook_conversation, notebook_id)
+    except ApplicationError as exc:
+        if exc.status_code != 503: raise
+        raise HTTPException(status_code=503, detail={
+            'message': 'Notebook saved; conversation initialization failed',
+            'notebook_id': notebook_id, 'recovery': f'/api/notebooks/{notebook_id}/conversation'}) from exc
+    return document
 
 
 @router.get('')

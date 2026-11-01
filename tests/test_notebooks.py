@@ -301,10 +301,13 @@ def test_orphan_temporary_write_is_not_a_notebook(tmp_path):
     finally: store.close()
 
 
-async def test_http_notebook_and_cell_contracts(store):
+async def test_http_notebook_and_cell_contracts(store, tmp_path):
     import httpx
     from main import create_app
+    from application.store import ApplicationStore
     app = create_app(); app.state.notebook_store = store
+    application = ApplicationStore(tmp_path / 'application', store)
+    app.state.application_store = application
     execution, client = service(store); app.state.notebook_service = execution
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://europa') as http:
         response = await http.post('/api/notebooks',json={'title':'Saved'})
@@ -331,6 +334,7 @@ async def test_http_notebook_and_cell_contracts(store):
         assert current['cell']['outputs'][0]['text'] == '42\n'
         assert (await http.delete(f'/api/notebooks/{notebook}',params={'revision':current['revision']})).status_code == 204
     await execution.close()
+    application.close()
 
 
 async def test_shutdown_keeps_document_outcome_uncertain(store):

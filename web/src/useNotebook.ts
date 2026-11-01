@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiError, json, request, terminalReceipt, type Receipt } from './api'
 import type { Output } from './Output'
+import { copyCell, nextRunnableCell } from './editorCommands'
 
 export type Meta = { notebook_id: string; title: string; revision: number }
 export type Cell = { id: string; cell_type: 'code' | 'markdown'; source: string | string[]; execution_count?: number | null; metadata: { europa?: { execution_id: string; status: string }; [key: string]: unknown }; outputs?: Output[] }
@@ -23,6 +24,7 @@ export function useNotebook() {
   const [connection, setConnection] = useState('disconnected')
   const [session, setSession] = useState({ state: 'disconnected', kernels: 0 })
   const current = useRef(doc), local = useRef(drafts), locked = useRef(false), epoch = useRef(0)
+  const opening = useRef<{ id: string; promise: Promise<Notebook | null> } | null>(null)
   const docUpdate = (value: Notebook | null) => { current.current = value; setDoc(value) }
   const persist = (value: Drafts, document = current.current) => {
     local.current = value; setDrafts(value)
@@ -36,14 +38,14 @@ export function useNotebook() {
   const id = doc?.metadata.europa.notebook_id
   const active = receipts.some(r => !terminalReceipt(r.state))
 
-  const open = async (notebook: string, discard = false) => {
-    if (locked.current) return
-    if (dirty && !discard && !confirm('Keep drafts in this browser and switch notebooks?')) return
+  const openOnce = async (notebook: string, discard = false) => {
+    if (locked.current) return null
+    if (dirty && !discard && !confirm('Keep drafts in this browser and switch notebooks?')) return null
     const token = ++epoch.current
     locked.current = true; setBusy(true)
     try {
       const next = await request<Notebook>(`/notebooks/${notebook}`)
-      if (token !== epoch.current) return
+      if (token !== epoch.current) return null
       let restored: Drafts = {}, revision = next.metadata.europa.revision, needsReview = false
       if (!discard) {
         const stored = localStorage.getItem(draftKey(notebook))
@@ -54,13 +56,17 @@ export function useNotebook() {
       docUpdate(next); persist(restored, next); setReceipts([]); setRemote(null); setError('')
       if (conflict) { setRemote(next); setError('Saved revision changed or drafts require review. Review recovered drafts explicitly.') }
       localStorage.setItem('europa.notebook', notebook)
-    } catch (e) { setError(String(e)) } finally { locked.current = false; setBusy(false) }
+      return next
+    } catch (e) { setError(String(e)); return null } finally { locked.current = false; setBusy(false) }
   }
-  useEffect(() => {
-    const last = localStorage.getItem('europa.notebook')
-    if (last) void open(last)
-    // Restore once; later changes are deliberate navigation.
-  }, [])
+  const open = (notebook: string, discard = false): Promise<Notebook | null> => {
+    if (!discard && opening.current?.id === notebook) return opening.current.promise
+    if (locked.current || active) { setError('Notebook operation in progress. Wait for its receipt or save to settle before switching.'); return Promise.resolve(null) }
+    const promise = openOnce(notebook, discard)
+    opening.current = { id: notebook, promise }
+    void promise.finally(() => { if (opening.current?.promise === promise) opening.current = null })
+    return promise
+  }
 
   async function action(fn: () => Promise<void>) {
     if (locked.current) return
@@ -158,16 +164,61 @@ export function useNotebook() {
     if (paused || remote) throw new Error('Resolve the conflict first.')
     await saveDrafts()
     const before = current.current!
-    docUpdate(await request<Notebook>(`/notebooks/${before.metadata.europa.notebook_id}${path}`, json(method, { revision: before.metadata.europa.revision, ...body })))
+    const next = await request<Notebook>(`/notebooks/${before.metadata.europa.notebook_id}${path}`, json(method, { revision: before.metadata.europa.revision, ...body }))
+    docUpdate(next); persist(local.current, next)
+  })
+  const paste = (copied: ReturnType<typeof copyCell>, index: number) => mutate('/cells', { ...copied, index })
+  const runAll = () => action(async () => {
+    if (paused || remote || active) throw new Error('Resolve the conflict or pending receipt before running all cells.')
+    await saveDrafts()
+    const notebook = current.current!.metadata.europa.notebook_id
+    let index = 0
+    while (true) {
+      const cell = nextRunnableCell(current.current!, index)
+      if (!cell) break
+      index = current.current!.cells.findIndex(c => c.id === cell) + 1
+      const revision = current.current!.metadata.europa.revision
+      let receipt: Receipt
+      try { receipt = await request(`/notebooks/${notebook}/cells/${cell}/execute`, json('POST', { revision })) }
+      catch (e) { if (e instanceof ApiError) throw e; throw new Error('Execution submission outcome unknown. Review receipt history before running again.') }
+      setReceipts(prev => [...prev.filter(r => r.execution_id !== receipt.execution_id), receipt])
+      // Receipt outcome, not the HTTP submission response, decides whether the next cell is safe to run.
+      for (let attempts = 0; !terminalReceipt(receipt.state) && attempts < 120; attempts++) {
+        await new Promise(resolve => setTimeout(resolve, 1000))
+        try { receipt = await request<Receipt>(`/notebooks/${notebook}/executions/${receipt.execution_id}`) }
+        catch { throw new Error(`Run all stopped at cell ${cell}: receipt lookup failed. Execution outcome unknown; it may still be running. Review history before continuing.`) }
+        setReceipts(prev => [...prev.filter(r => r.execution_id !== receipt.execution_id), receipt])
+      }
+      if (!terminalReceipt(receipt.state)) throw new Error(`Run all stopped at cell ${cell}: receipt still ${receipt.state} after waiting. Execution outcome unknown; it may still be running. Review history before continuing.`)
+      const next = await request<Notebook>(`/notebooks/${notebook}`)
+      docUpdate(next); persist(local.current, next)
+      if (receipt.state !== 'applied' || receipt.result?.status !== 'ok') throw new Error(`Run all stopped at cell ${cell}: receipt ${receipt.state}${receipt.result ? ` (${receipt.result.status})` : ''}. Review execution history before continuing.`)
+    }
   })
   const compare = () => action(async () => { setRemote(await request<Notebook>(`/notebooks/${id}`)); setPaused(true) })
+  const close = () => {
+    if (current.current && Object.keys(local.current).length) {
+      try {
+        const saved = JSON.parse(localStorage.getItem(draftKey(current.current.metadata.europa.notebook_id)) ?? 'null')
+        if (JSON.stringify(saved?.drafts) !== JSON.stringify(local.current)) throw new Error('Draft not stored')
+      } catch { setError('Browser draft storage unavailable. Save drafts before leaving.'); return false }
+    }
+    // The previous notebook's draft is already in localStorage; do not call persist({}).
+    docUpdate(null); local.current = {}; setDrafts({}); setRemote(null); setReceipts([]); setPaused(false); setError('')
+    localStorage.removeItem('europa.notebook')
+    return true
+  }
+  const forget = (notebook: string) => {
+    localStorage.removeItem(draftKey(notebook))
+    if (localStorage.getItem('europa.notebook') === notebook) localStorage.removeItem('europa.notebook')
+  }
   const resolve = (keep: boolean) => {
     if (!remote) return
     setPaused(keep); docUpdate(remote); persist(keep ? local.current : {}, remote); setRemote(null)
     setError(keep ? 'Drafts rebased for review. Save explicitly to accept them; autosave remains paused.' : '')
   }
   return { doc, drafts, busy, error, remote, paused, autosave, setAutosave, dirty, receipts, connection, session, active,
-    edit, open, save, execute, mutate, action, compare, resolve, setError,
+    edit, open, close, forget, save, execute, mutate, paste, runAll, action, compare, resolve, setError,
     resume: () => { setPaused(false); setError('') },
     create: (title: string) => action(async () => {
       const next = await request<Notebook>('/notebooks', json('POST', { title }))

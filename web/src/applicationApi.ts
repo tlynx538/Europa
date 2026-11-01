@@ -1,15 +1,15 @@
 import { ApiError, json, request } from './api'
 
-export interface RecordData<T> { id: string; revision: number; notebook_id: string | null; data: T }
+export interface RecordData<T> { id: string; revision: number; notebook_id: string | null; created_at: number; data: T }
 export interface Links { notebook_id?: string | null; cell_id?: string | null; task_id?: string | null; message_id?: string | null; document_revision?: number | null; execution_receipt_id?: string | null }
 export type TaskStatus = 'pending' | 'in_progress' | 'blocked' | 'needs_input' | 'completed' | 'cancelled'
 export interface Task { id: string; title: string; acceptance_criteria: string[]; parent_id: string | null; dependencies: string[]; status: TaskStatus; explanation: string | null; weight: number; links: Links; evidence: { summary: string; message_id?: string | null; execution_receipt_id?: string | null }[]; accepted: boolean }
 export interface TaskView extends Task { progress: number; display: { compact: boolean; checkmark: boolean; show_progress: boolean }; accepted_by?: string | null }
-export interface Roadmap { objective: string; tasks: TaskView[]; progress: number }
+export interface Roadmap { objective: string; tasks: TaskView[]; progress: number; overall_display: { label: string; percentage_position: string } }
 export interface Project { title: string; status: string; notebooks: { notebook_id: string; present: boolean }[] }
 export interface Conversation { title: string }
-export interface Message extends Links { content: string; parent_id: string | null; state: string; author_role: string }
-export interface Comment { project_id: string; cell_id: string; content: string; parent_id: string | null; resolved: boolean; thread_id: string; anchor_status: string; classification: string }
+export interface Message extends Links { content: string; parent_id: string | null; state: string; author_role: string; placement_after_cell_id?: string | null }
+export interface Comment { project_id: string; cell_id: string; content: string; parent_id: string | null; resolved: boolean; thread_id: string; anchor_status: string; classification: string; author_role: string }
 export interface Activity extends Links { summary: string; result: string }
 export async function all<T>(path: string): Promise<RecordData<T>[]> {
   let cursor: number | null = 0

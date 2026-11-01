@@ -48,12 +48,16 @@ SCHEMA = [
         parent_id TEXT REFERENCES records(id), revision INTEGER NOT NULL CHECK(revision>0),
         created_at REAL NOT NULL, updated_at REAL NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)),
         CHECK((kind='project' AND project_id IS NULL AND notebook_id IS NULL) OR
+              (kind IN ('conversation','message') AND project_id IS NULL AND notebook_id IS NOT NULL) OR
               (kind!='project' AND project_id IS NOT NULL)))""",
     """CREATE TABLE memberships (notebook_id TEXT PRIMARY KEY REFERENCES catalog(id),
         project_id TEXT NOT NULL REFERENCES records(id), associated INTEGER NOT NULL CHECK(associated IN (0,1)))""",
     """CREATE TABLE versions (roadmap_id TEXT NOT NULL REFERENCES records(id), revision INTEGER NOT NULL,
         created_at REAL NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)), PRIMARY KEY(roadmap_id,revision))""",
     """CREATE TABLE operations (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response TEXT NOT NULL CHECK(json_valid(response)))""",
+    """CREATE TABLE canonical_notebook_conversations (
+        notebook_id TEXT PRIMARY KEY REFERENCES catalog(id),
+        conversation_id TEXT NOT NULL UNIQUE REFERENCES records(id))""",
     'CREATE INDEX history ON records(kind,project_id,sequence)',
     'CREATE INDEX replies ON records(parent_id,sequence)',
     """CREATE TRIGGER immutable_records BEFORE UPDATE ON records WHEN OLD.kind IN ('message','activity')
@@ -61,6 +65,9 @@ SCHEMA = [
     """CREATE TRIGGER retain_records BEFORE DELETE ON records BEGIN SELECT RAISE(ABORT,'historical record'); END""",
     """CREATE TRIGGER immutable_versions BEFORE UPDATE ON versions BEGIN SELECT RAISE(ABORT,'immutable version'); END""",
     """CREATE TRIGGER retain_versions BEFORE DELETE ON versions BEGIN SELECT RAISE(ABORT,'historical version'); END""",
+    """CREATE TABLE canonical_message_placements (
+        message_id TEXT PRIMARY KEY REFERENCES records(id),
+        after_cell_id TEXT)""",
 ]
 
 
@@ -91,13 +98,25 @@ class ApplicationStore:
             self.db.execute('PRAGMA foreign_keys=ON')
             self.db.execute('PRAGMA journal_mode=WAL')
             self.db.execute('PRAGMA synchronous=FULL')
-            with self.transaction():
-                version = self.db.execute('PRAGMA user_version').fetchone()[0]
-                if version == 0:
-                    for statement in SCHEMA: self.db.execute(statement)
-                    self.db.execute('PRAGMA user_version=1')
-                elif version != 1:
-                    raise ApplicationError('Unsupported application schema version', 503)
+            version = self.db.execute('PRAGMA user_version').fetchone()[0]
+            if version not in (0, 1, 2, 3): raise ApplicationError('Unsupported application schema version', 503)
+            # A v1 table rebuild must disable FK enforcement outside BEGIN; all
+            # original rows and dependent tables are checked before commit.
+            if version == 1: self.db.execute('PRAGMA foreign_keys=OFF')
+            try:
+                with self.transaction():
+                    if version == 0:
+                        for statement in SCHEMA: self.db.execute(statement)
+                        self.db.execute('PRAGMA user_version=3')
+                    elif version == 1:
+                        self._migrate_v1()
+                    elif version == 2:
+                        self.db.execute(SCHEMA[-1])
+                        self.db.execute('PRAGMA user_version=3')
+                    if self.db.execute('PRAGMA foreign_key_check').fetchall():
+                        raise ApplicationError('Application database integrity check failed', 503)
+            finally:
+                if version == 1: self.db.execute('PRAGMA foreign_keys=ON')
             if self.db.execute('PRAGMA quick_check').fetchone()[0] != 'ok' or self.db.execute('PRAGMA foreign_key_check').fetchall():
                 raise ApplicationError('Application database integrity check failed', 503)
             os.fsync(self.boundary.fd)
@@ -105,6 +124,17 @@ class ApplicationStore:
         except BaseException:
             self.close()
             raise
+
+    def _migrate_v1(self):
+        self.db.execute(SCHEMA[1].replace('CREATE TABLE records', 'CREATE TABLE records_v2'))
+        columns = 'sequence,id,kind,project_id,notebook_id,parent_id,revision,created_at,updated_at,data'
+        self.db.execute(f'INSERT INTO records_v2 ({columns}) SELECT {columns} FROM records')
+        self.db.execute('DROP TABLE records')
+        self.db.execute('ALTER TABLE records_v2 RENAME TO records')
+        for statement in (SCHEMA[5], *SCHEMA[6:10]):
+            self.db.execute(statement)
+        self.db.execute(SCHEMA[-1])
+        self.db.execute('PRAGMA user_version=3')
 
     @contextmanager
     def transaction(self):
@@ -152,6 +182,43 @@ class ApplicationStore:
             row = self.db.execute('SELECT 1 FROM memberships JOIN catalog ON catalog.id=notebook_id '
                 'WHERE project_id=? AND notebook_id=? AND associated=1 AND present=1', (project, notebook)).fetchone()
             if not row: raise ApplicationError('Notebook is not a present project member', 409)
+
+    def _notebook_scope(self, notebook):
+        self.notebooks.open(notebook)
+        if not self.db.execute('SELECT 1 FROM catalog WHERE id=? AND present=1', (notebook,)).fetchone():
+            raise ApplicationError('Notebook is not present', 404)
+
+    def ensure_notebook_conversation(self, notebook):
+        with self._mutation_transaction():
+            self._notebook_scope(notebook)
+            mapping = self.db.execute('SELECT conversation_id FROM canonical_notebook_conversations WHERE notebook_id=?',
+                                      (notebook,)).fetchone()
+            if mapping:
+                self._adopt_unplaced(mapping['conversation_id'], notebook)
+                return self._view(self._row(mapping['conversation_id'], 'conversation'))
+            record = self._insert('conversation', None, notebook, {'title': 'Discussion'})
+            self.db.execute('INSERT INTO canonical_notebook_conversations VALUES (?,?)', (notebook, record['id']))
+            return record
+
+    def _adopt_unplaced(self, conversation, notebook):
+        # First current-layout observation, not reconstructed message/cell chronology.
+        # The surrounding transaction holds the notebook lock through this snapshot.
+        cells = self.notebooks.open(notebook)['cells']
+        anchor = cells[-1]['id'] if cells else None
+        self.db.execute("""INSERT INTO canonical_message_placements (message_id,after_cell_id)
+            SELECT id,? FROM records WHERE parent_id=? AND kind='message'
+              AND json_type(data,'$.placement_after_cell_id') IS NULL
+            ON CONFLICT(message_id) DO NOTHING""", (anchor, conversation))
+
+    def legacy_notebook_conversations(self, notebook, *, after=0, limit=50):
+        if not 1 <= limit <= 100 or after < 0: raise ApplicationError('Invalid pagination')
+        with self.transaction():
+            self._notebook_scope(notebook)
+            rows = self.db.execute("SELECT * FROM records WHERE kind='conversation' AND notebook_id=? "
+                'AND id NOT IN (SELECT conversation_id FROM canonical_notebook_conversations) '
+                'AND sequence>? ORDER BY sequence LIMIT ?', (notebook, after, limit+1)).fetchall()
+            return {'items': [self._view(row) for row in rows[:limit]],
+                    'next_cursor': rows[limit-1]['sequence'] if len(rows) > limit else None}
 
     def _insert(self, kind, project, notebook, data, parent=None):
         identity, now = uuid.uuid4().hex, time.time()
@@ -231,12 +298,22 @@ class ApplicationStore:
         linked = links.get('notebook_id') or notebook
         if notebook and links.get('notebook_id') and notebook != links['notebook_id']:
             raise ApplicationError('Notebook reference differs from scope')
-        if linked: self._scope(project, linked)
+        if linked:
+            if project is None: self._notebook_scope(linked)
+            else: self._scope(project, linked)
         if links.get('task_id') and tasks is None:
-            if not self._task_exists(project, links['task_id']): raise ApplicationError('Unknown project task')
+            task_project = project
+            if task_project is None and linked:
+                membership = self.db.execute('SELECT project_id FROM memberships WHERE notebook_id=? AND associated=1',
+                                             (linked,)).fetchone()
+                task_project = membership['project_id'] if membership else None
+                if task_project: self._scope(task_project, linked)
+            if not task_project or not self._task_exists(task_project, links['task_id']):
+                raise ApplicationError('Unknown project task')
         if links.get('message_id'):
             message = self._row(links['message_id'], 'message')
-            if message['project_id'] != project: raise ApplicationError('Message belongs to another project')
+            if not self._message_in_scope(message, project, linked):
+                raise ApplicationError('Message belongs to another conversation scope')
         if links.get('cell_id'):
             if not linked: raise ApplicationError('Cell reference requires notebook')
             self.notebooks.cell(self.notebooks.open(linked), links['cell_id'])
@@ -250,12 +327,22 @@ class ApplicationStore:
                 raise ApplicationError('Receipt belongs to another cell')
         return linked
 
+    def _message_in_scope(self, message, project, notebook):
+        if message['project_id'] == project and (notebook is None or message['notebook_id'] == notebook):
+            return project is not None or notebook is not None
+        return (project is not None and notebook is not None and message['project_id'] is None
+                and message['notebook_id'] == notebook and self.db.execute(
+                    'SELECT 1 FROM canonical_notebook_conversations WHERE notebook_id=? AND conversation_id=?',
+                    (notebook, message['parent_id'])).fetchone() is not None)
+
     def _task_exists(self, project, identity):
         return any(identity == t['id'] for row in self.db.execute("SELECT versions.data FROM versions JOIN records ON records.id=roadmap_id WHERE records.project_id=?", (project,))
                    for t in json.loads(row[0])['tasks'])
 
     def conversation_create(self, body):
         def work():
+            if body.notebook_id is not None:
+                raise ApplicationError('Notebook conversations use the canonical notebook endpoint', 409)
             self._scope(body.project_id, body.notebook_id)
             return self._insert('conversation', body.project_id, body.notebook_id, {'title': body.title})
         return self._mutate(body.operation_id, 'conversation_create', body.model_dump(), work)
@@ -265,13 +352,30 @@ class ApplicationStore:
         if author_role not in {'user', 'coordinator', 'coding_agent', 'system/tool'}:
             raise ApplicationError('Invalid server author role')
         def work():
-            row = self._row(conversation, 'conversation'); self._scope(row['project_id'], row['notebook_id'])
+            row = self._row(conversation, 'conversation')
+            if row['project_id'] is not None and row['notebook_id'] is not None:
+                raise ApplicationError('Historical notebook conversation is read-only', 409)
+            if row['project_id'] is None:
+                self._notebook_scope(row['notebook_id'])
+                canonical = self.db.execute('SELECT conversation_id FROM canonical_notebook_conversations WHERE notebook_id=?',
+                                            (row['notebook_id'],)).fetchone()
+                if canonical is None or canonical['conversation_id'] != conversation:
+                    raise ApplicationError('Historical notebook conversation is read-only', 409)
+                self._adopt_unplaced(conversation, row['notebook_id'])
+            else: self._scope(row['project_id'], row['notebook_id'])
             notebook = self._links(row['project_id'], row['notebook_id'], body.model_dump())
+            if row['project_id'] is None and body.message_id:
+                referenced = self._row(body.message_id, 'message')
+                if referenced['parent_id'] != conversation:
+                    raise ApplicationError('Message reference belongs to another conversation')
             if body.parent_id:
                 parent = self._row(body.parent_id, 'message')
                 if parent['parent_id'] != conversation: raise ApplicationError('Reply belongs to another conversation')
             data = body.model_dump(exclude={'operation_id'})
             data.update(author_role=author_role, conversation_id=conversation)
+            if row['project_id'] is None:
+                cells = self.notebooks.open(row['notebook_id'])['cells']
+                data['placement_after_cell_id'] = cells[-1]['id'] if cells else None
             return self._insert('message', row['project_id'], notebook, data, conversation)
         return self._mutate(body.operation_id, 'message_append/' + conversation + '/' + author_role, body.model_dump(), work)
 
@@ -311,7 +415,8 @@ class ApplicationStore:
                 for evidence in task['evidence']:
                     if evidence.get('message_id'):
                         message = self._row(evidence['message_id'], 'message')
-                        if message['project_id'] != project: raise ApplicationError('Evidence belongs to another project')
+                        if not self._message_in_scope(message, project, linked):
+                            raise ApplicationError('Evidence belongs to another project or notebook')
                     if evidence.get('execution_receipt_id'):
                         if not linked: raise ApplicationError('Execution evidence requires notebook')
                         receipt = self.notebooks.execution(linked, evidence['execution_receipt_id'])
@@ -435,6 +540,10 @@ class ApplicationStore:
 
     def _view(self, row):
         result = self._record(row); data = result['data']
+        if row['kind'] == 'message' and 'placement_after_cell_id' not in data:
+            placement = self.db.execute('SELECT after_cell_id FROM canonical_message_placements WHERE message_id=?',
+                                        (row['id'],)).fetchone()
+            if placement is not None: data['placement_after_cell_id'] = placement['after_cell_id']
         if row['kind'] == 'project':
             data['notebooks'] = [dict(r) for r in self.db.execute('SELECT notebook_id,present FROM memberships '
                 'JOIN catalog ON catalog.id=notebook_id WHERE project_id=? AND associated=1 ORDER BY notebook_id', (row['id'],))]
@@ -459,7 +568,14 @@ class ApplicationStore:
         if not 1 <= limit <= 100 or after < 0: raise ApplicationError('Invalid pagination')
         with self.transaction():
             if project: self._project(project, writable=False)
-            if parent: self._row(parent, 'conversation')
+            if parent:
+                conversation = self._row(parent, 'conversation')
+                if kind == 'message' and conversation['project_id'] is None:
+                    canonical = self.db.execute('SELECT 1 FROM canonical_notebook_conversations WHERE notebook_id=? AND conversation_id=?',
+                                                (conversation['notebook_id'], parent)).fetchone()
+                    if canonical:
+                        self._notebook_scope(conversation['notebook_id'])
+                        self._adopt_unplaced(parent, conversation['notebook_id'])
             clauses, args = ['kind=?', 'sequence>?'], [kind, after]
             for name, value in [('project_id', project), ('parent_id', parent), ('notebook_id', notebook)]:
                 if value is not None: clauses.append(name + '=?'); args.append(value)

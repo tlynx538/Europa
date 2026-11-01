@@ -1,18 +1,23 @@
 import { test, expect } from '@playwright/test'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 test('production UI recovers after an actual backend process restart', async ({ page, request }, info) => {
-  const root = mkdtempSync(join(process.env.EUROPA_TEST_TMP || tmpdir(), 'europa-restart-'))
+  const root = mkdtempSync(join(realpathSync(process.env.EUROPA_TEST_TMP || tmpdir()), 'europa-restart-'))
   const url = 'http://127.0.0.1:18100'
   let backend: ChildProcess | undefined
+  let stderr = ''
   const start = async () => {
+    stderr = ''
     backend = spawn(resolve('../.venv/bin/python'), ['-m', 'uvicorn', 'main:app', '--app-dir', resolve('../api/src'), '--host', '127.0.0.1', '--port', '18100'], {
-      env: { ...process.env, EUROPA_NOTEBOOK_ROOT: join(root, 'notebooks'), EUROPA_APPLICATION_ROOT: join(root, 'application'), EUROPA_RUNTIME_PROVIDER: 'local', EUROPA_GATEWAY_URL: '', EUROPA_GATEWAY_TOKEN: '' }, stdio: 'ignore',
+      env: { ...process.env, EUROPA_NOTEBOOK_ROOT: join(root, 'notebooks'), EUROPA_APPLICATION_ROOT: join(root, 'application'), EUROPA_RUNTIME_PROVIDER: 'local', EUROPA_GATEWAY_URL: '', EUROPA_GATEWAY_TOKEN: '' }, stdio: ['ignore', 'ignore', 'pipe'],
     })
-    await expect.poll(async () => { if (backend?.exitCode !== null) return false; try { return (await request.get(`${url}/api/notebooks`)).ok() } catch { return false } }, { timeout: 30000 }).toBe(true)
+    backend.stderr?.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-4000) })
+    try {
+      await expect.poll(async () => { if (backend?.exitCode !== null) throw new Error(`Backend exited ${backend?.exitCode}`); try { return (await request.get(`${url}/api/notebooks`)).ok() } catch { return false } }, { timeout: 30000 }).toBe(true)
+    } catch (error) { throw new Error(`Backend failed to start at ${url}: ${String(error)}\n${stderr}`) }
   }
   const stop = async () => {
     const process = backend
@@ -29,22 +34,31 @@ test('production UI recovers after an actual backend process restart', async ({ 
     await request.post(`${url}/api/notebooks/${id}/cells`, { data: { revision: 1, source: 'print(123)' } })
     const project = await (await request.post(`${url}/api/projects`, { data: { operation_id: crypto.randomUUID(), title: 'Restart project' } })).json()
     await request.post(`${url}/api/projects/${project.id}/notebooks`, { data: { operation_id: crypto.randomUUID(), revision: 1, notebook_id: id } })
-    const conversation = await (await request.post(`${url}/api/conversations`, { data: { operation_id: crypto.randomUUID(), project_id: project.id } })).json()
+    const conversationResponse = await request.get(`${url}/api/notebooks/${id}/conversation`)
+    expect(conversationResponse.status()).toBe(200)
+    const conversation = await conversationResponse.json()
     await request.post(`${url}/api/conversations/${conversation.id}/messages`, { data: { operation_id: crypto.randomUUID(), content: 'Survives backend restart' } })
-    await page.goto(url)
-    await page.getByLabel('Notebook', { exact: true }).selectOption(id)
-    await page.getByLabel('Project', { exact: true }).selectOption(project.id)
-    await page.getByRole('button', { name: 'Run', exact: true }).click()
+    await page.goto(`${url}/notebooks/${id}`)
+    await expect(page).toHaveURL(new RegExp(`/notebooks/${id}$`))
+    await page.getByRole('menubar').getByRole('menuitem', { name: 'View' }).click()
+    await page.getByRole('menuitemcheckbox', { name: 'Roadmap panel' }).click()
+    await expect(page.locator('.project-settings-dialog').getByLabel('Project', { exact: true })).toHaveValue(project.id)
+    await expect(page.locator('.message-composer')).toBeVisible()
+    await page.locator('.cell .cm-content').first().click(); await page.getByRole('toolbar', { name: 'Notebook commands' }).getByRole('button', { name: 'Run selected cell' }).click()
     await expect(page.locator('.cell .outputs')).toContainText('123', { timeout: 45000 })
     await stop()
-    await expect(page.getByRole('status')).toContainText('reconnecting', { timeout: 10000 })
+    await expect(page.locator('footer.status')).toContainText('reconnecting', { timeout: 10000 })
     await start()
-    await expect(page.getByRole('status')).toContainText('API: connected', { timeout: 15000 })
+    await expect(page.locator('footer.status')).toContainText('API: connected', { timeout: 15000 })
     await page.reload()
+    await expect(page).toHaveURL(new RegExp(`/notebooks/${id}$`))
+    await expect(page.locator('.project-settings-dialog').getByLabel('Project', { exact: true })).toHaveValue(project.id)
     await expect(page.getByRole('heading', { name: 'Restart proof' })).toBeVisible()
     await expect(page.locator('.cell .outputs')).toContainText('123')
-    await expect(page.getByRole('status')).toContainText('Kernel: disconnected')
+    await expect(page.locator('footer.status')).toContainText('Kernel: disconnected')
     await expect(page.getByText('Survives backend restart', { exact: true })).toBeVisible()
+    const restored = await (await request.get(`${url}/api/notebooks/${id}/conversation`)).json()
+    expect(restored.id).toBe(conversation.id)
     await page.screenshot({ path: info.outputPath('restart.png'), fullPage: true })
   } finally { await stop() }
 })

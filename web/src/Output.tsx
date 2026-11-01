@@ -1,12 +1,12 @@
 import { useMemo } from 'react'
 import { previewDocument, rasterData } from './renderSafety'
 
-export interface Output { output_type: string; name?: string; text?: string | string[]; traceback?: string[]; data?: Record<string, unknown> }
+export interface Output { output_type: string; name?: string; text?: string | string[]; traceback?: string[]; data?: Record<string, unknown>; execution_count?: number | null }
 const text = (value: unknown): string => Array.isArray(value) ? value.join('') : typeof value === 'string' ? value : JSON.stringify(value, null, 2) ?? ''
 
-function Markup({ value }: { value: string }) {
+function Markup({ value, kind }: { value: string; kind: 'html' | 'svg' }) {
   const doc = useMemo(() => previewDocument(value), [value])
-  return <iframe title="Isolated notebook output" sandbox="" referrerPolicy="no-referrer" srcDoc={doc} />
+  return <iframe className={`output-${kind}`} title="Isolated notebook output" sandbox="" referrerPolicy="no-referrer" srcDoc={doc} />
 }
 
 // Deliberately small static Plotly subset: data only, no Plotly JS, URLs, templates,
@@ -32,11 +32,10 @@ function StaticPlot({ value }: { value: unknown }) {
 
 export function Outputs({ outputs }: { outputs: Output[] }) {
   return <div className="outputs">{outputs.map((output, index) => {
-    if (output.output_type === 'stream') return <pre key={index}>{text(output.text)}</pre>
-    if (output.output_type === 'error') return <pre className="error" key={index}>{text(output.traceback).replace(/\x1b\[[0-9;]*m/g, '')}</pre>
+    if (output.output_type === 'stream' || output.output_type === 'error') return <div className="output-entry" key={index}><div className="output-prompt" /><div className="output-content"><pre className={output.output_type === 'error' ? 'error' : undefined}>{output.output_type === 'error' ? text(output.traceback).replace(/\x1b\[[0-9;]*m/g, '') : text(output.text)}</pre></div></div>
     const data = output.data ?? {}
     let rendered
-    if ('text/html' in data || 'image/svg+xml' in data) rendered = <Markup value={text(data['text/html'] ?? data['image/svg+xml'])} />
+    if ('text/html' in data || 'image/svg+xml' in data) rendered = <Markup value={text(data['text/html'] ?? data['image/svg+xml'])} kind={'text/html' in data ? 'html' : 'svg'} />
     else if ('image/png' in data || 'image/jpeg' in data) {
       const mime = 'image/png' in data ? 'image/png' : 'image/jpeg'
       const url = rasterData(mime, text(data[mime]))
@@ -45,6 +44,6 @@ export function Outputs({ outputs }: { outputs: Output[] }) {
     else if ('application/json' in data) rendered = <pre>{JSON.stringify(data['application/json'], null, 2)}</pre>
     else if ('text/plain' in data) rendered = <pre>{text(data['text/plain'])}</pre>
     else rendered = <p>Unsupported output is preserved in the notebook.</p>
-    return <div key={index}>{rendered}{Object.keys(data).some(m => m.includes('javascript') || m.includes('widget')) && <p>Executable JavaScript/widgets are disabled.</p>}</div>
+    return <div className="output-entry" key={index}><div className="output-prompt">{output.output_type === 'execute_result' ? `Out [${output.execution_count ?? ' '}]:` : ''}</div><div className="output-content">{rendered}{Object.keys(data).some(m => m.includes('javascript') || m.includes('widget')) && <p>Executable JavaScript/widgets are disabled.</p>}</div></div>
   })}</div>
 }
