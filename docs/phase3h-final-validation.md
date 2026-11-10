@@ -344,5 +344,11 @@ validation; an unrelated pre-existing Python process was left untouched. No
 owner preview was started or stopped.
 
 The complete [changed-file inventory](phase3h-final-changed-files.txt) includes
-the preserved A–C feature work and D+E corrections/evidence. Commit identification
-will be added after the final staged-file audit and commit. No Phase 4 work begins.
+the preserved A–C feature work and D+E corrections/evidence.
+
+Implementation commit: `a6b2daab4f3662073f9edf411aea5bbcc1d31ce3` on
+`feature/phase3h-workspace-navigation`. A documentation-only follow-up records
+this identifier. The staged audit covered 332 files, including 264 PNG captures;
+no notebook documents, SQLite files, registry state, credentials, symlinks,
+submodules, build output, or unrelated work were staged. `AGENTS.md` was preserved.
+No Phase 4 work begins.

@@ -652,3 +652,5 @@ agent implementation, or infrastructure reconfiguration is included.
 
 Stop after D+E. The Linux/containerd and native-browser-zoom limitations are
 explicit in the final report; skipped checks are not claimed as passes.
+
+Validated implementation commit: `a6b2daab4f3662073f9edf411aea5bbcc1d31ce3`.
