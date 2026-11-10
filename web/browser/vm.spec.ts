@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from '../browserFixtures'
 
 // The opt-in server uses the approved VM's existing bounded runc profile and
 // cached image. Its loopback port is exposed only by Lima's existing forwarding.

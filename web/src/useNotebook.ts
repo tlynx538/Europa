@@ -24,6 +24,7 @@ export function useNotebook() {
   const [connection, setConnection] = useState('disconnected')
   const [session, setSession] = useState({ state: 'disconnected', kernels: 0 })
   const current = useRef(doc), local = useRef(drafts), locked = useRef(false), epoch = useRef(0)
+  const receiptVersion = useRef(0)
   const opening = useRef<{ id: string; promise: Promise<Notebook | null> } | null>(null)
   const docUpdate = (value: Notebook | null) => { current.current = value; setDoc(value) }
   const persist = (value: Drafts, document = current.current) => {
@@ -111,7 +112,8 @@ export function useNotebook() {
   const acceptRefresh = (next: Notebook) => {
     const before = current.current
     if (!before || before.metadata.europa.notebook_id !== next.metadata.europa.notebook_id || locked.current || review.current) return
-    if (before.metadata.europa.revision === next.metadata.europa.revision) return
+    // A GET issued before a save may arrive after its acknowledged newer revision.
+    if (next.metadata.europa.revision <= before.metadata.europa.revision) return
     const conflict = Object.keys(local.current).some(cell => {
       const old = before.cells.find(c => c.id === cell), fresh = next.cells.find(c => c.id === cell)
       return !old || !fresh || source(old) !== source(fresh) || old.cell_type !== fresh.cell_type
@@ -128,6 +130,7 @@ export function useNotebook() {
     let timer: ReturnType<typeof setTimeout>
     async function poll() {
       try {
+        const version = receiptVersion.current
         const history: Receipt[] = []
         let offset: number | null = 0
         do {
@@ -138,7 +141,7 @@ export function useNotebook() {
           request<Notebook>(`/notebooks/${id}`, { signal: controller.signal }),
           request<{ state: string; kernels: number }>(`/notebooks/${id}/session`, { signal: controller.signal }),
         ])
-        if (!stopped) { setReceipts(history); setSession(live); setConnection('connected'); acceptRefreshRef.current(saved) }
+        if (!stopped) { if (version === receiptVersion.current) setReceipts(history); setSession(live); setConnection('connected'); acceptRefreshRef.current(saved) }
       } catch { if (!stopped) { setConnection('reconnecting — execution is not cancelled'); setSession({ state: 'unknown (connection lost)', kernels: 0 }) } }
       finally { if (!stopped) timer = setTimeout(poll, 1500) }
     }
@@ -146,12 +149,18 @@ export function useNotebook() {
     return () => { stopped = true; controller.abort(); clearTimeout(timer) }
   }, [id])
 
+  async function submitExecution(notebook: string, cell: string, revision: number): Promise<Receipt> {
+    // An older history snapshot must not erase a newly accepted receipt.
+    receiptVersion.current++
+    try { return await request(`/notebooks/${notebook}/cells/${cell}/execute`, json('POST', { revision })) }
+    finally { receiptVersion.current++ }
+  }
   const execute = (cell: string) => action(async () => {
     if (paused || remote) throw new Error('Resolve the saved revision conflict before running.')
     await saveDrafts()
     const before = current.current!
     let receipt: Receipt
-    try { receipt = await request(`/notebooks/${before.metadata.europa.notebook_id}/cells/${cell}/execute`, json('POST', { revision: before.metadata.europa.revision })) }
+    try { receipt = await submitExecution(before.metadata.europa.notebook_id, cell, before.metadata.europa.revision) }
     catch (e) {
       if (e instanceof ApiError) throw e
       throw new Error('Submission response lost. Check receipt history before explicitly running again; execution may have been accepted.')
@@ -179,7 +188,7 @@ export function useNotebook() {
       index = current.current!.cells.findIndex(c => c.id === cell) + 1
       const revision = current.current!.metadata.europa.revision
       let receipt: Receipt
-      try { receipt = await request(`/notebooks/${notebook}/cells/${cell}/execute`, json('POST', { revision })) }
+      try { receipt = await submitExecution(notebook, cell, revision) }
       catch (e) { if (e instanceof ApiError) throw e; throw new Error('Execution submission outcome unknown. Review receipt history before running again.') }
       setReceipts(prev => [...prev.filter(r => r.execution_id !== receipt.execution_id), receipt])
       // Receipt outcome, not the HTTP submission response, decides whether the next cell is safe to run.

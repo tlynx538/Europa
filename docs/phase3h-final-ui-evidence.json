@@ -1,0 +1,290 @@
+{
+  "browser": {
+    "startTime": "2026-11-10T20:44:17.399Z",
+    "duration": 147337.9,
+    "expected": 56,
+    "skipped": 1,
+    "unexpected": 0,
+    "flaky": 0
+  },
+  "checks": [
+    {
+      "name": "CAS-evidence",
+      "evidence": {
+        "savedRevision": 4,
+        "moveRequest": {
+          "revision": 4,
+          "index": 0
+        },
+        "responseStatus": 200
+      }
+    },
+    {
+      "name": "multiple-kernel-identity",
+      "evidence": {
+        "notebooks": 2,
+        "distinctKernels": true,
+        "verifiedIdle": true
+      }
+    },
+    {
+      "name": "restart-contract",
+      "evidence": {
+        "sameNotebook": true,
+        "sameConversation": true,
+        "revision": 4,
+        "projectVerified": true,
+        "recentPersisted": true
+      }
+    },
+    {
+      "name": "responsive-and-zoom",
+      "evidence": {
+        "dimensions": [
+          {
+            "width": 1440,
+            "height": 900,
+            "cssZoom": "1",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 1440,
+              "height": 900,
+              "top": 0,
+              "right": 1440,
+              "bottom": 900,
+              "left": 0
+            }
+          },
+          {
+            "width": 1440,
+            "height": 900,
+            "cssZoom": "1.25",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 1440,
+              "height": 1125,
+              "top": 0,
+              "right": 1440,
+              "bottom": 1125,
+              "left": 0
+            }
+          },
+          {
+            "width": 1440,
+            "height": 900,
+            "cssZoom": "1.5",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 1440,
+              "height": 1350,
+              "top": 0,
+              "right": 1440,
+              "bottom": 1350,
+              "left": 0
+            }
+          },
+          {
+            "width": 1440,
+            "height": 900,
+            "cssZoom": "2",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 1440,
+              "height": 1800,
+              "top": 0,
+              "right": 1440,
+              "bottom": 1800,
+              "left": 0
+            }
+          },
+          {
+            "width": 1280,
+            "height": 800,
+            "cssZoom": "1",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 1280,
+              "height": 800,
+              "top": 0,
+              "right": 1280,
+              "bottom": 800,
+              "left": 0
+            }
+          },
+          {
+            "width": 1280,
+            "height": 800,
+            "cssZoom": "1.25",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 1280,
+              "height": 1000,
+              "top": 0,
+              "right": 1280,
+              "bottom": 1000,
+              "left": 0
+            }
+          },
+          {
+            "width": 1280,
+            "height": 800,
+            "cssZoom": "1.5",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 1280,
+              "height": 1200,
+              "top": 0,
+              "right": 1280,
+              "bottom": 1200,
+              "left": 0
+            }
+          },
+          {
+            "width": 1280,
+            "height": 800,
+            "cssZoom": "2",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 1280,
+              "height": 1600,
+              "top": 0,
+              "right": 1280,
+              "bottom": 1600,
+              "left": 0
+            }
+          },
+          {
+            "width": 768,
+            "height": 1024,
+            "cssZoom": "1",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 768,
+              "height": 1024,
+              "top": 0,
+              "right": 768,
+              "bottom": 1024,
+              "left": 0
+            }
+          },
+          {
+            "width": 768,
+            "height": 1024,
+            "cssZoom": "1.25",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 768,
+              "height": 1280,
+              "top": 0,
+              "right": 768,
+              "bottom": 1280,
+              "left": 0
+            }
+          },
+          {
+            "width": 768,
+            "height": 1024,
+            "cssZoom": "1.5",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 768,
+              "height": 1536,
+              "top": 0,
+              "right": 768,
+              "bottom": 1536,
+              "left": 0
+            }
+          },
+          {
+            "width": 768,
+            "height": 1024,
+            "cssZoom": "2",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 768,
+              "height": 2048,
+              "top": 0,
+              "right": 768,
+              "bottom": 2048,
+              "left": 0
+            }
+          },
+          {
+            "width": 390,
+            "height": 844,
+            "cssZoom": "1",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 390,
+              "height": 844,
+              "top": 0,
+              "right": 390,
+              "bottom": 844,
+              "left": 0
+            }
+          },
+          {
+            "width": 390,
+            "height": 844,
+            "cssZoom": "1.25",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 390,
+              "height": 1055,
+              "top": 0,
+              "right": 390,
+              "bottom": 1055,
+              "left": 0
+            }
+          },
+          {
+            "width": 390,
+            "height": 844,
+            "cssZoom": "1.5",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 390,
+              "height": 1266,
+              "top": 0,
+              "right": 390,
+              "bottom": 1266,
+              "left": 0
+            }
+          },
+          {
+            "width": 390,
+            "height": 844,
+            "cssZoom": "2",
+            "body": {
+              "x": 0,
+              "y": 0,
+              "width": 390,
+              "height": 1752.734375,
+              "top": 0,
+              "right": 390,
+              "bottom": 1752.734375,
+              "left": 0
+            }
+          }
+        ],
+        "nativeZoomShortcutSupported": false,
+        "method": "CSS zoom/reflow; native shortcut probed separately"
+      }
+    }
+  ]
+}

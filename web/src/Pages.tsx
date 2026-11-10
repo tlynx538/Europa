@@ -53,6 +53,7 @@ export function ProjectDetail({ id, navigate }: BrowserProps & { id: string }) {
   const [projects, setProjects] = useState<RecordData<Project>[]>([]), [roadmaps, setRoadmaps] = useState<RecordData<Roadmap>[]>([])
   const [conversations, setConversations] = useState<RecordData<Conversation>[]>([]), [activities, setActivities] = useState<RecordData<Activity>[]>([])
   const [errorLoad, setErrorLoad] = useState(''), [missing, setMissing] = useState(false)
+  const [query, setQuery] = useState(''), [sort, setSort] = useState('title-asc')
   const { busy, error, pending, run, recovery } = useOperation()
   const refresh = useCallback(async () => {
     const [p, n, projects, roadmaps, conversations, activities] = await Promise.all([
@@ -73,7 +74,10 @@ export function ProjectDetail({ id, navigate }: BrowserProps & { id: string }) {
   }, [id])
   const memberIds = new Set(projects.flatMap(p => p.data.notebooks.map(n => n.notebook_id)))
   const available = notebooks.filter(n => !memberIds.has(n.notebook_id))
-  return <main className="browser-page"><nav className="browser-breadcrumb" aria-label="Breadcrumb"><a href="/projects" onClick={e => { e.preventDefault(); void navigate('/projects') }}>Projects</a> / {project?.data.title ?? 'Project'}</nav>
+  const titleFor = (notebook: Project['notebooks'][number]) => notebooks.find(item => item.notebook_id === notebook.notebook_id)?.title ?? 'Missing notebook'
+  const visible = project?.data.notebooks.filter(n => titleFor(n).toLowerCase().includes(query.trim().toLowerCase()))
+    .sort((a, b) => sort === 'title-desc' ? titleFor(b).localeCompare(titleFor(a)) : titleFor(a).localeCompare(titleFor(b))) ?? []
+  return <main className="browser-page"><a href="/" onClick={e => { e.preventDefault(); void navigate('/') }}>← Back to Europa Home</a><nav className="browser-breadcrumb" aria-label="Breadcrumb">Legacy project / {project?.data.title ?? 'Project'}</nav>
     {missing && <h1>Project not found</h1>}
     {errorLoad && <p role="alert" className="alert">{errorLoad}</p>}{error && <p role="alert" className="alert">{error}</p>}{recovery}
      {project && <><div className="browser-heading"><h1>{project.data.title}</h1><ActionMenu label="Project actions" disabled={busy || pending}>
@@ -89,9 +93,8 @@ export function ProjectDetail({ id, navigate }: BrowserProps & { id: string }) {
        <ActionItem className="menu-row destructive" onSelect={() => void run(async () => {
         if (!confirm(`Delete project ${project.data.title}? This tombstones the project; notebook documents remain.`)) return
         await change(projectUrl(id), 'DELETE', { revision: project.revision }); await refresh()
-       })}>Delete project</ActionItem></>}</ActionMenu></div><section id="overview"><h2>Overview</h2><p>Status: {project.data.status}</p><p>{project.data.notebooks.length} notebooks · {roadmaps.length} roadmaps · {conversations.length} conversations · {activities.length} activities</p></section>
-      <section id="project-notebooks"><h2>Notebooks</h2><ul className="browser-list">{project.data.notebooks.map(n => <li key={n.notebook_id}>
-        {n.present ? <a href={notebookUrl(n.notebook_id)} onClick={e => { e.preventDefault(); void navigate(notebookUrl(n.notebook_id)) }}>{notebooks.find(item => item.notebook_id === n.notebook_id)?.title ?? n.notebook_id}</a> : <span>Missing notebook {n.notebook_id}</span>}
+       })}>Delete project</ActionItem></>}</ActionMenu></div><section id="project-notebooks" aria-label="Notebooks"><h2>Notebooks</h2><p className="muted">{project.data.notebooks.length} notebook{project.data.notebooks.length === 1 ? '' : 's'} · {project.data.status}</p><div className="browser-filters"><label>Search project notebooks <input type="search" value={query} onChange={e => setQuery(e.target.value)} /></label><label>Sort project notebooks <select value={sort} onChange={e => setSort(e.target.value)}><option value="title-asc">Title A–Z</option><option value="title-desc">Title Z–A</option></select></label></div><ul className="browser-list">{visible.map(n => <li key={n.notebook_id}>
+        {n.present && notebooks.some(item => item.notebook_id === n.notebook_id) ? <a href={notebookUrl(n.notebook_id)} onClick={e => { e.preventDefault(); void navigate(notebookUrl(n.notebook_id)) }}><span className="browser-icon browser-icon-file" aria-hidden="true" />{titleFor(n)}</a> : <span><span className="browser-icon browser-icon-file" aria-hidden="true" />Missing notebook ({n.notebook_id})</span>}
          <ActionMenu label={`Actions for ${notebooks.find(item => item.notebook_id === n.notebook_id)?.title ?? n.notebook_id}`} disabled={busy || pending}><ActionItem className="menu-row destructive" onSelect={() => void run(async () => {
           if (!confirm('Remove this notebook from the project? The notebook document will remain.')) return
           await change(`${projectUrl(id)}/notebooks`, 'POST', { revision: project.revision, notebook_id: n.notebook_id, associated: false }); await refresh()
@@ -112,10 +115,10 @@ export function ProjectDetail({ id, navigate }: BrowserProps & { id: string }) {
         try { await change(`${projectUrl(id)}/notebooks`, 'POST', { revision: project.revision, notebook_id }) }
         catch (e) { await refresh().catch(() => {}); throw new Error(`Notebook ${notebook_id} was created but could not be assigned. It remains standalone; retry the pending association before any other application change. ${String(e)}`) }
         await refresh(); await navigate(notebookUrl(notebook_id))
-      })}>New notebook in project</button>}</section>
-      <section id="project-roadmap"><h2>Roadmap</h2>{roadmaps.length ? <ul>{roadmaps.map(r => <li key={r.id}>{r.data.objective} · {r.data.progress}% · {r.data.tasks.length} tasks</li>)}</ul> : <p>No roadmaps yet. Open a notebook to work on a roadmap.</p>}</section>
+      })}>New notebook in project</button>}{!visible.length && <p className="browser-empty">{query ? 'No notebooks match your search.' : 'No notebooks in this project yet. Create a notebook here or add an existing one.'}</p>}</section>
+      <details className="project-details"><summary>Project details and history</summary><section id="overview"><h2>Overview</h2><p>Status: {project.data.status}</p><p>{project.data.notebooks.length} notebooks · {roadmaps.length} roadmaps · {conversations.length} conversations · {activities.length} activities</p></section><section id="project-roadmap"><h2>Roadmap</h2>{roadmaps.length ? <ul>{roadmaps.map(r => <li key={r.id}>{r.data.objective} · {r.data.progress}% · {r.data.tasks.length} tasks</li>)}</ul> : <p>No roadmaps yet. Open a notebook to work on a roadmap.</p>}</section>
       <section id="project-conversations"><h2>Legacy project conversation history (read-only)</h2>{conversations.length ? <ul>{conversations.map(c => <LegacyProjectThread key={c.id} conversation={c} />)}</ul> : <p>No legacy project conversations.</p>}</section>
-       <section id="project-activity"><h2>Activity</h2>{activities.length ? <ActivityTimeline activities={activities} navigate={navigate} notebooks={notebooks} roadmaps={roadmaps} /> : !errorLoad && <p>No activity recorded for this project. Open a notebook to continue work.</p>}</section>
+       <section id="project-activity"><h2>Activity</h2>{activities.length ? <ActivityTimeline activities={activities} navigate={navigate} notebooks={notebooks} roadmaps={roadmaps} /> : !errorLoad && <p>No activity recorded for this project. Open a notebook to continue work.</p>}</section></details>
     </>}
   </main>
 }

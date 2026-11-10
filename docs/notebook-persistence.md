@@ -1,5 +1,58 @@
 # Phase 3A: notebook persistence and cell management
 
+## Phase 3H B: physical notebook association (integration candidate)
+
+The historical private-flat-store description below still applies to existing
+catalog notebooks and all execution receipts. A physical workspace adapter now
+supports canonical `.ipynb` documents under the pinned `EUROPA_WORKSPACE_ROOT`
+(default launch directory). It uses the **same NotebookStore validation, document
+API, revision checks, cell mutations and receipt recovery**, with document I/O
+directed to a verified relative path. It does not maintain a private document
+copy. Existing private documents are never moved automatically.
+
+`POST /api/workspace/notebooks` takes `{path, operation_id}` to create a physical
+Python notebook. `POST /api/workspace/notebooks/open` takes the same fields to
+explicitly associate an existing nbformat 4.5 notebook. Both return
+`{notebook_id, path, project_id, project_path}`; absent project fields are null.
+`GET /api/workspace/notebooks/{id}/location` returns the verified location, or
+null for a private catalog document. These routes never provision a kernel.
+The normal `/api/notebooks/{id}` APIs remain the editor's contract.
+
+First association allocates a server ID and revision 1, preserves standard cells,
+outputs and other notebook metadata, and replaces untrusted `metadata.europa`
+and cell execution markers. A copied notebook ID does not adopt private history
+or another file's identity. Subsequent opens of the bound path retain its ID and
+revision. Unsupported format versions/cells are rejected rather than converted.
+
+The private `.workspace-notebooks.json` manifest stores root/parent identities,
+relative paths, initial operation IDs, committed content hashes and pending
+replacement hashes. It is an association/write journal, not notebook content
+storage. Before a document write, the adapter persists the intended hash, writes
+and fsyncs an exclusive hidden temporary, rechecks the bound directory and old
+content, publishes atomically, fsyncs the directory, and acknowledges the hash.
+New files use no-replace publication. Reconciliation recognizes the exact new
+bytes after a lost acknowledgement; it never reexecutes code. An absent
+unpublished creation can be explicitly retried with its original journaled ID.
+External edits, unsafe links and directory replacement block reads/saves for
+review. Concurrent external editors do not participate in Europa's mutex or CAS;
+this is not a race-free multi-writer filesystem protocol.
+
+The nearest verified bound ancestor project establishes membership. The same
+project ID is registered in the application catalog on first notebook association,
+and the existing canonical notebook conversation is ensured idempotently. A
+copied/unverified descriptor grants no membership. Catalog reassignment/removal
+of a physical notebook and deletion of physical notebooks/projects are rejected;
+physical moves and an external-conflict recovery UI are not implemented.
+
+If the filesystem step succeeds but application initialization fails, retry the
+**same workspace operation**, retained by the browser. Do not create another
+notebook. Backups must include the physical workspace, private manifest/receipts
+and application SQLite together. Restoring into a different root/parent inode
+requires an explicit future rebinding workflow; paths or copied IDs alone do not
+authorize adoption. See [Checkpoint B evidence and limitations](phase3h-home-dashboard-validation.md).
+
+## Historical private-store contract
+
 Phase 3B now adds a separate [application persistence layer](conversational-notebooks.md)
 without changing these notebook contracts. Its prerequisite [safety review](phase3b-safety-review.md)
 defines workspace boundaries, conservative receipt retention and mandatory output

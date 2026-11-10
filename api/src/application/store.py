@@ -68,7 +68,28 @@ SCHEMA = [
     """CREATE TABLE canonical_message_placements (
         message_id TEXT PRIMARY KEY REFERENCES records(id),
         after_cell_id TEXT)""",
+    """CREATE TABLE recent_opens (
+        notebook_id TEXT PRIMARY KEY REFERENCES catalog(id), opened_at REAL NOT NULL)""",
 ]
+
+WORKSPACE_JOURNAL = """CREATE TABLE workspace_operations (
+    id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, root_device INTEGER NOT NULL,
+    root_inode INTEGER NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL,
+    precondition TEXT, expected_device INTEGER, expected_inode INTEGER,
+    expected_digest TEXT, state TEXT NOT NULL CHECK(state IN ('pending','confirmed')),
+    response TEXT CHECK(response IS NULL OR json_valid(response)))"""
+
+PROJECT_INTENTS = """CREATE TABLE project_intents (
+    operation_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
+    root_device INTEGER NOT NULL, root_inode INTEGER NOT NULL, path TEXT NOT NULL,
+    project_id TEXT NOT NULL UNIQUE, dir_device INTEGER, dir_inode INTEGER,
+    response TEXT CHECK(response IS NULL OR json_valid(response)))"""
+PROJECT_BINDINGS = """CREATE TABLE project_bindings (
+    project_id TEXT PRIMARY KEY, root_device INTEGER NOT NULL, root_inode INTEGER NOT NULL,
+    path TEXT NOT NULL, dir_device INTEGER NOT NULL, dir_inode INTEGER NOT NULL,
+    descriptor_device INTEGER NOT NULL, descriptor_inode INTEGER NOT NULL,
+    UNIQUE(root_device,root_inode,path))"""
+
 
 
 class ApplicationStore:
@@ -99,7 +120,7 @@ class ApplicationStore:
             self.db.execute('PRAGMA journal_mode=WAL')
             self.db.execute('PRAGMA synchronous=FULL')
             version = self.db.execute('PRAGMA user_version').fetchone()[0]
-            if version not in (0, 1, 2, 3): raise ApplicationError('Unsupported application schema version', 503)
+            if version not in (0, 1, 2, 3, 4, 5, 6): raise ApplicationError('Unsupported application schema version', 503)
             # A v1 table rebuild must disable FK enforcement outside BEGIN; all
             # original rows and dependent tables are checked before commit.
             if version == 1: self.db.execute('PRAGMA foreign_keys=OFF')
@@ -107,12 +128,27 @@ class ApplicationStore:
                 with self.transaction():
                     if version == 0:
                         for statement in SCHEMA: self.db.execute(statement)
-                        self.db.execute('PRAGMA user_version=3')
+                        self.db.execute('PRAGMA user_version=4')
                     elif version == 1:
                         self._migrate_v1()
                     elif version == 2:
-                        self.db.execute(SCHEMA[-1])
+                        self.db.execute(SCHEMA[-2])
                         self.db.execute('PRAGMA user_version=3')
+                    if version in (1, 2, 3):
+                        self.db.execute(SCHEMA[-1])
+                        self.db.execute('PRAGMA user_version=4')
+                    if version < 5:
+                        self.db.execute(WORKSPACE_JOURNAL)
+                        self.db.execute('PRAGMA user_version=5')
+                    if version < 6:
+                        self.db.execute(PROJECT_INTENTS)
+                        self.db.execute(PROJECT_BINDINGS)
+                        self.db.execute('PRAGMA user_version=6')
+                    if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='workspace_operations'").fetchone() is None:
+                        raise ApplicationError('Missing workspace journal', 503)
+                    for name in ('project_intents', 'project_bindings'):
+                        if self.db.execute('SELECT 1 FROM sqlite_master WHERE name=?', (name,)).fetchone() is None:
+                            raise ApplicationError('Missing project identity table', 503)
                     if self.db.execute('PRAGMA foreign_key_check').fetchall():
                         raise ApplicationError('Application database integrity check failed', 503)
             finally:
@@ -133,7 +169,7 @@ class ApplicationStore:
         self.db.execute('ALTER TABLE records_v2 RENAME TO records')
         for statement in (SCHEMA[5], *SCHEMA[6:10]):
             self.db.execute(statement)
-        self.db.execute(SCHEMA[-1])
+        self.db.execute(SCHEMA[-2])
         self.db.execute('PRAGMA user_version=3')
 
     @contextmanager
@@ -187,6 +223,27 @@ class ApplicationStore:
         self.notebooks.open(notebook)
         if not self.db.execute('SELECT 1 FROM catalog WHERE id=? AND present=1', (notebook,)).fetchone():
             raise ApplicationError('Notebook is not present', 404)
+
+    def record_notebook_open(self, notebook):
+        """Explicit navigation event; never called by notebook reads or execution."""
+        with self._mutation_transaction():
+            self._notebook_scope(notebook)
+            now = time.time()
+            self.db.execute('INSERT INTO recent_opens VALUES (?,?) ON CONFLICT(notebook_id) '
+                            'DO UPDATE SET opened_at=MAX(excluded.opened_at, recent_opens.opened_at + 0.000001)',
+                            (notebook, now))
+            self.db.execute('DELETE FROM recent_opens WHERE notebook_id NOT IN '
+                            '(SELECT notebook_id FROM recent_opens ORDER BY opened_at DESC, notebook_id LIMIT 100)')
+            row = self.db.execute('SELECT opened_at FROM recent_opens WHERE notebook_id=?', (notebook,)).fetchone()
+            return {'notebook_id': notebook, 'opened_at': row['opened_at']}
+
+    def recent_notebooks(self, *, limit=20):
+        if not 1 <= limit <= 20: raise ApplicationError('Invalid pagination')
+        with self.transaction():
+            return [dict(row) for row in self.db.execute(
+                'SELECT recent_opens.notebook_id,opened_at FROM recent_opens '
+                'JOIN catalog ON catalog.id=recent_opens.notebook_id WHERE catalog.present=1 '
+                'ORDER BY opened_at DESC,recent_opens.notebook_id LIMIT ?', (limit,))]
 
     def ensure_notebook_conversation(self, notebook):
         with self._mutation_transaction():
@@ -245,12 +302,88 @@ class ApplicationStore:
             self.db.execute('INSERT INTO operations VALUES (?,?,?)', (operation, fingerprint, response))
             return result
 
+    def workspace_lookup(self, operation, fingerprint, root):
+        with self._mutation_transaction():
+            row = self.db.execute('SELECT * FROM workspace_operations WHERE id=?', (operation,)).fetchone()
+            if row and (row['fingerprint'] != fingerprint or (row['root_device'], row['root_inode']) != root):
+                raise ApplicationError('Operation ID reused with different input or workspace', 409)
+            return dict(row) if row else None
+
+    def workspace_intent(self, operation, fingerprint, root, kind, path, precondition, expected):
+        with self._mutation_transaction():
+            self.db.execute('INSERT INTO workspace_operations VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)',
+                (operation, fingerprint, *root, kind, path, precondition,
+                 expected[0] if expected else None, expected[1] if expected else None,
+                 expected[2] if expected else None, 'pending'))
+
+    def workspace_confirm(self, operation, response):
+        with self._mutation_transaction():
+            self.db.execute("UPDATE workspace_operations SET state='confirmed',response=? WHERE id=? AND state='pending'",
+                            (encoded(response), operation))
+
+    def project_lookup(self, operation, fingerprint, root):
+        with self.mutex:
+            row = self.db.execute('SELECT * FROM project_intents WHERE operation_id=?', (operation,)).fetchone()
+            if row and (row['fingerprint'] != fingerprint or (row['root_device'], row['root_inode']) != root):
+                raise ApplicationError('Operation ID reused with different input or workspace', 409)
+            # IDs are shared with the single-file journal; never allow a conflicting replay.
+            if not row and self.db.execute('SELECT 1 FROM workspace_operations WHERE id=?', (operation,)).fetchone():
+                raise ApplicationError('Operation ID reused with different input', 409)
+            return dict(row) if row else None
+
+    def project_intent(self, operation, fingerprint, root, path, project_id):
+        with self._mutation_transaction():
+            if self.db.execute('SELECT 1 FROM project_bindings WHERE root_device=? AND root_inode=? AND path=?', (*root, path)).fetchone():
+                raise ApplicationError('Project already exists', 409)
+            self.db.execute('INSERT INTO project_intents VALUES (?,?,?,?,?,?,NULL,NULL,NULL)',
+                            (operation, fingerprint, *root, path, project_id))
+
+    def project_directory(self, operation, identity):
+        with self._mutation_transaction():
+            self.db.execute('UPDATE project_intents SET dir_device=?,dir_inode=? WHERE operation_id=? AND dir_inode IS NULL',
+                            (*identity, operation))
+
+    def project_confirm(self, operation, root, path, dir_identity, descriptor_identity, result):
+        with self._mutation_transaction():
+            row = self.db.execute('SELECT * FROM project_intents WHERE operation_id=?', (operation,)).fetchone()
+            if row is None or row['response'] is not None or (row['dir_device'], row['dir_inode']) != dir_identity:
+                raise ApplicationError('Project identity changed before binding', 409)
+            self.db.execute('INSERT INTO project_bindings VALUES (?,?,?,?,?,?,?,?)',
+                            (row['project_id'], *root, path, *dir_identity, *descriptor_identity))
+            self.db.execute('UPDATE project_intents SET response=? WHERE operation_id=?', (encoded(result), operation))
+
+    def project_binding(self, root, path):
+        with self.mutex:
+            row = self.db.execute('SELECT * FROM project_bindings WHERE root_device=? AND root_inode=? AND path=?',
+                                  (*root, path)).fetchone()
+            return dict(row) if row else None
+
+
     @contextmanager
     def _mutation_transaction(self):
         try:
             with self.transaction(): yield
         except sqlite3.Error as exc:
             raise ApplicationError('Application storage transaction failed', 503) from exc
+
+    def bind_physical_notebook(self, notebook, location):
+        """Idempotent catalog association only after verified physical binding."""
+        with self._mutation_transaction():
+            self._notebook_scope(notebook)
+            project = location.get('project_id')
+            if project:
+                if self.db.execute('SELECT 1 FROM records WHERE id=?', (project,)).fetchone() is None:
+                    now = time.time()
+                    data = {'title': location['project_path'].split('/')[-1], 'description': '', 'status': 'active', 'file_references': []}
+                    self.db.execute('INSERT INTO records(id,kind,revision,created_at,updated_at,data) VALUES (?,?,1,?,?,?)',
+                                    (project, 'project', now, now, encoded(data)))
+                self._project(project)
+                current = self.db.execute('SELECT * FROM memberships WHERE notebook_id=?', (notebook,)).fetchone()
+                if current and (current['project_id'] != project or not current['associated']):
+                    raise ApplicationError('Physical notebook project association changed; review required', 409)
+                if not current:
+                    self.db.execute('INSERT INTO memberships VALUES (?,?,1)', (notebook, project))
+        return self.ensure_notebook_conversation(notebook)
 
     def project_create(self, body):
         def work():
@@ -270,6 +403,9 @@ class ApplicationStore:
 
     def membership(self, project, body):
         def work():
+            location = getattr(self.notebooks, 'location', lambda _: None)(body.notebook_id)
+            if location and (not body.associated or location.get('project_id') != project):
+                raise ApplicationError('Physical notebook membership follows its verified directory; moving is not supported', 409)
             # Explicit release remains possible for historical projects; adding
             # membership still requires an active project.
             row = self._project(project, writable=body.associated)
@@ -287,6 +423,8 @@ class ApplicationStore:
 
     def project_delete(self, project, body):
         def work():
+            if self.db.execute('SELECT 1 FROM project_bindings WHERE project_id=?', (project,)).fetchone():
+                raise ApplicationError('Physical project deletion is not supported', 409)
             row = self._row(project, 'project')
             data = json.loads(row['data'])
             if data['status'] == 'deleted': raise ApplicationError('Project is already deleted', 409)

@@ -24,10 +24,15 @@ from runtime.admission_config import configured_admission
 from runtime.registry import RuntimeRegistry
 from runtime.prewarming import PrewarmingRuntimeSupervisor
 from runtime.lifecycle import IdlePolicy
+from workspace.browser import WorkspaceBrowser, WorkspaceError
+from workspace.router import router as workspace_router
+from workspace.mutation import WorkspaceMutation
+from workspace.notebooks import WorkspaceNotebookStore
+from workspace.dashboard import DashboardObservation, router as dashboard_router
 
 
 def create_app(*, gateway_url: str | None = None, gateway_token: str | None = None,
-               runtime_provider=None):
+               runtime_provider=None, workspace_root: Path | None = None):
     @asynccontextmanager
     async def lifespan(app):
         url = gateway_url or os.environ.get("EUROPA_GATEWAY_URL")
@@ -60,11 +65,22 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
         try:
             notebook_root = Path(os.environ.get('EUROPA_NOTEBOOK_ROOT',
                 str(Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'europa/notebooks')))
-            notebook_store = NotebookStore(notebook_root)
+            application_root = Path(os.environ.get('EUROPA_APPLICATION_ROOT', str(notebook_root / 'application')))
+            app.state.workspace.protect(notebook_root)
+            app.state.workspace.protect(application_root)
+            registry_path = Path(os.environ.get('EUROPA_RUNTIME_REGISTRY',
+                str(Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / 'europa/runtime.sqlite3')))
+            for suffix in ('', '-wal', '-shm', '-journal'):
+                app.state.workspace.protect(str(registry_path) + suffix)
+            notebook_store = WorkspaceNotebookStore(notebook_root, app.state.workspace)
             app.state.notebook_store = notebook_store
             application_store = ApplicationStore(os.environ.get('EUROPA_APPLICATION_ROOT',
                 str(notebook_root / 'application')), notebook_store)
             app.state.application_store = application_store
+            for private_fd in (notebook_store.fd, application_store.boundary.fd):
+                info = os.fstat(private_fd)
+                app.state.workspace.private_identities.add((info.st_dev, info.st_ino))
+            app.state.workspace_mutation = WorkspaceMutation(app.state.workspace, application_store)
             if guard:
                 guard.acquire()
                 registry_path = Path(os.environ.get('EUROPA_RUNTIME_REGISTRY',
@@ -95,10 +111,14 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
                 supervisor.lifecycle.start()
             notebook_service = NotebookService(notebook_store, supervisor)
             app.state.notebook_service = notebook_service
+            app.state.dashboard_observation = DashboardObservation(app)
             yield
         finally:
             try:
                 try:
+                    observation = getattr(app.state, 'dashboard_observation', None)
+                    if observation:
+                        await observation.close()
                     if notebook_service:
                         await notebook_service.close(supervisor.lifecycle.policy.grace if getattr(supervisor, 'lifecycle', None) else 30)
                 finally:
@@ -112,8 +132,14 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
                     registry.close()
                 if guard:
                     guard.close()
+                app.state.workspace.close()
 
     app = FastAPI(lifespan=lifespan)
+    app.state.workspace = WorkspaceBrowser(workspace_root or Path(os.environ.get('EUROPA_WORKSPACE_ROOT', os.getcwd())))
+
+    @app.exception_handler(WorkspaceError)
+    async def workspace_error(_: Request, exc: WorkspaceError):
+        return JSONResponse(status_code=exc.status_code, content={'detail': str(exc)})
 
     @app.middleware('http')
     async def browser_boundary(request, call_next):
@@ -150,6 +176,8 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
     async def runtime_error(_: Request, exc: RuntimeErrorBase):
         return JSONResponse(status_code=503, content={"detail": str(exc)})
 
+    @app.get('/browse')
+    @app.get('/text')
     @app.get('/activity')
     @app.get('/notebooks/{notebook_id}')
     @app.get('/notebooks')
@@ -166,6 +194,8 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
     app.include_router(router, prefix="/api", tags=["kernel"])
     app.include_router(notebook_router, prefix="/api", tags=["notebooks"])
     app.include_router(application_router, prefix="/api", tags=["application"])
+    app.include_router(workspace_router, prefix="/api", tags=["workspace"])
+    app.include_router(dashboard_router, prefix="/api", tags=["dashboard"])
     assets = Path(__file__).resolve().parents[2] / 'web' / 'dist' / 'assets'
     if assets.is_dir():
         app.mount('/assets', StaticFiles(directory=assets), name='web-assets')

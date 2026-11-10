@@ -24,7 +24,10 @@ async def test_fastapi_restart_persists_application_and_execution(tmp_path):
             doc=await post(f'/notebooks/{nid}/cells',{'revision':1,'source':'print(6*7)'})
             cid=doc['cells'][0]['id']
             p=await post(f"/projects/{p['id']}/notebooks",{'operation_id':op(),'revision':1,'notebook_id':nid})
-            c=await post('/conversations',{'operation_id':op(),'project_id':p['id'],'notebook_id':nid})
+            canonical=await http.get(f'/api/notebooks/{nid}/conversation')
+            assert canonical.status_code==200,canonical.text
+            c=canonical.json()
+            assert (await http.get(f'/api/notebooks/{nid}/conversation')).json()['id']==c['id']
             msg=await post(f"/conversations/{c['id']}/messages",{'operation_id':op(),'content':'Compute the result','cell_id':cid})
             r=await post('/roadmaps',{'operation_id':op(),'project_id':p['id'],'notebook_id':nid,'objective':'Compute','tasks':[
                 {'id':'compute','title':'Compute answer','acceptance_criteria':['Result is 42'],'links':{'notebook_id':nid,'cell_id':cid}}]})

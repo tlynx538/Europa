@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Page } from '../browserFixtures'
 
 const api = `http://127.0.0.1:${process.env.EUROPA_TEST_PORT || '18000'}/api`
 async function roadmap(page: Page) {
@@ -16,10 +16,13 @@ test('menus are single-open, keyboard accessible and bounded by the viewport', a
   const menus = page.getByRole('menubar')
   await menus.getByRole('menuitem', { name: 'File' }).click()
   await page.keyboard.press('ArrowDown')
+  await expect(page.getByRole('menuitem', { name: 'Return Home' })).toBeFocused()
+  await page.keyboard.press('ArrowDown')
   await expect(page.getByRole('menuitem', { name: 'Open project…' })).toBeFocused()
   await page.keyboard.press('ArrowDown')
   await expect(page.getByRole('menuitem', { name: 'Open notebook…' })).toBeFocused()
-  await page.keyboard.press('ArrowDown')
+  await expect(page.getByRole('menuitem', { name: 'Close notebook' })).toBeEnabled()
+  await page.keyboard.press('End')
   await expect(page.getByRole('menuitem', { name: 'Close notebook' })).toBeFocused()
   await menus.getByRole('menuitem', { name: 'View' }).click()
   await expect(menus.getByRole('menuitem', { name: 'File' })).toHaveAttribute('data-state', 'closed')
