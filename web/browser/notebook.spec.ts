@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '../browserFixtures'
 
 const api = `http://127.0.0.1:${process.env.EUROPA_TEST_PORT || '18000'}/api`
 async function seed(request: APIRequestContext, title: string, code = 'print(42)', cellType = 'code') {

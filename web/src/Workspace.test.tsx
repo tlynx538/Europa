@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { Workspace } from './Workspace'
 
 let settingsOpen = false
@@ -77,4 +77,16 @@ it('keeps an always-visible retry shell on a canonical GET error', async () => {
   render(<Workspace {...props} notebookId="other" renderNotebook={canvas => <>{canvas.history}{canvas.composer}</>} />)
   await waitFor(() => expect(screen.getAllByRole('button', { name: 'Retry conversation' }).length).toBeGreaterThan(0))
   expect(screen.queryByRole('button', { name: 'Send' })).toBeNull()
+})
+
+it('keeps a recovered message retry disabled until its canonical scope is loaded', async () => {
+  localStorage.setItem('europa.pending.application', JSON.stringify({ path: '/conversations/canonical/messages', method: 'POST', body: { notebook_id: 'first', content: 'Retained', operation_id: 'same' } }))
+  let release!: (response: Response) => void
+  const canonical = new Promise<Response>(resolve => { release = resolve })
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => url === '/api/notebooks/first/conversation' ? canonical : new Response(JSON.stringify({ items: [], next_cursor: null }))))
+  render(<Workspace {...props} notebookId="first" renderNotebook={canvas => <>{canvas.history}{canvas.composer}</>} />)
+  expect(screen.getAllByRole<HTMLButtonElement>('button', { name: 'Retry pending operation' }).every(button => button.disabled)).toBe(true)
+  await act(async () => release(new Response(JSON.stringify({ id: 'canonical', notebook_id: 'first', revision: 1, data: { title: 'Conversation' } }))))
+  await waitFor(() => expect(screen.getAllByRole<HTMLButtonElement>('button', { name: 'Retry pending operation' }).every(button => !button.disabled)).toBe(true))
+  expect(JSON.parse(localStorage.getItem('europa.pending.application')!).body.operation_id).toBe('same')
 })

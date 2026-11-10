@@ -61,6 +61,56 @@ def test_canonical_ensure_is_unique_durable_and_independent_of_membership(state,
     assert app.ensure_notebook_conversation(nid) == canonical
 
 
+async def test_recent_opens_explicit_bounded_durable_and_document_unchanged(state, tmp_path):
+    import httpx
+    from main import create_app
+    app, nb = state
+    server = create_app(); server.state.application_store = app; server.state.notebook_store = nb
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server), base_url='http://europa') as http:
+        assert (await http.get('/api/notebooks/recent')).json() == {'items': []}
+        docs = [nb.create(str(i)) for i in range(3)]
+        ids = [doc['metadata']['europa']['notebook_id'] for doc in docs]
+        files = [(tmp_path / 'documents' / (nid + '.ipynb')).read_bytes() for nid in ids]
+        assert (await http.get('/api/notebooks')).status_code == 200
+        assert (await http.get(f'/api/notebooks/{ids[0]}')).status_code == 200
+        assert (await http.get('/api/notebooks/recent')).json() == {'items': []}
+        assert (await http.post('/api/notebooks/' + 'f'*32 + '/opened')).status_code == 404
+        assert (await http.get('/api/notebooks/recent')).json() == {'items': []}
+        first = await http.post(f'/api/notebooks/{ids[0]}/opened')
+        assert first.status_code == 200, first.text
+        assert set(first.json()) == {'notebook_id', 'opened_at'}
+        assert first.json()['notebook_id'] == ids[0]
+        assert isinstance(first.json()['opened_at'], (int, float))
+        for nid in ids[1:]:
+            assert (await http.post(f'/api/notebooks/{nid}/opened')).status_code == 200
+        retry = await http.post(f'/api/notebooks/{ids[0]}/opened')
+        assert retry.status_code == 200
+        assert retry.json()['opened_at'] >= first.json()['opened_at']
+        assert [x['notebook_id'] for x in (await http.get('/api/notebooks/recent')).json()['items']] == [ids[0], ids[2], ids[1]]
+        assert len((await http.get('/api/notebooks/recent?limit=1')).json()['items']) == 1
+        for limit in ('0', '21', '-1'):
+            assert (await http.get('/api/notebooks/recent', params={'limit': limit})).status_code == 422
+        assert [(tmp_path / 'documents' / (nid + '.ipynb')).read_bytes() for nid in ids] == files
+        assert all(nb.open(nid)['metadata']['europa']['revision'] == 1 for nid in ids)
+        nb.delete(ids[0], 1)
+        assert [x['notebook_id'] for x in (await http.get('/api/notebooks/recent')).json()['items']] == [ids[2], ids[1]]
+        assert (await http.post(f'/api/notebooks/{ids[0]}/opened')).status_code == 404
+    app.close(); app.__init__(tmp_path / 'application', nb)
+    assert [x['notebook_id'] for x in app.recent_notebooks()] == [ids[2], ids[1]]
+    with app.transaction():
+        assert app.db.execute('SELECT count(*) FROM recent_opens').fetchone()[0] == 3
+
+
+def test_recent_opens_retains_only_100_present_or_missing_catalog_entries(state):
+    app, nb = state
+    ids = [nb.create()['metadata']['europa']['notebook_id'] for _ in range(102)]
+    for nid in ids: app.record_notebook_open(nid)
+    assert [x['notebook_id'] for x in app.recent_notebooks(limit=20)] == list(reversed(ids[-20:]))
+    with app.transaction():
+        assert app.db.execute('SELECT count(*) FROM recent_opens').fetchone()[0] == 100
+    assert ids[0] not in [x['notebook_id'] for x in app.recent_notebooks(limit=20)]
+
+
 def test_canonical_message_scoping_and_project_evidence(state):
     app, nb = state
     a, b = [nb.create()['metadata']['europa']['notebook_id'] for _ in range(2)]
@@ -207,7 +257,7 @@ def test_v1_migration_preserves_legacy_records_and_integrity(tmp_path):
     path = root / 'application.sqlite3'
     db = sqlite3.connect(path)
     legacy_check = "(kind='project' AND project_id IS NULL AND notebook_id IS NULL) OR\n              (kind!='project' AND project_id IS NOT NULL)"
-    schema = [statement for statement in SCHEMA if 'canonical_notebook_conversations' not in statement and 'canonical_message_placements' not in statement]
+    schema = [statement for statement in SCHEMA if 'canonical_notebook_conversations' not in statement and 'canonical_message_placements' not in statement and 'recent_opens' not in statement]
     schema[1] = schema[1].replace(
         "(kind='project' AND project_id IS NULL AND notebook_id IS NULL) OR\n              (kind IN ('conversation','message') AND project_id IS NULL AND notebook_id IS NOT NULL) OR\n              (kind!='project' AND project_id IS NOT NULL)", legacy_check)
     for statement in schema: db.execute(statement)
@@ -229,10 +279,11 @@ def test_v1_migration_preserves_legacy_records_and_integrity(tmp_path):
     app = ApplicationStore(root, nb)
     try:
         canonical = app.ensure_notebook_conversation(nid)
+        assert app.record_notebook_open(nid)['notebook_id'] == nid
         assert canonical['id'] not in {'a','b'}
         assert [r['id'] for r in app.legacy_notebook_conversations(nid)['items']] == ['a','b']
         with app.transaction():
-            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 3
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 6
             assert not app.db.execute('PRAGMA foreign_key_check').fetchall()
             assert app.db.execute('SELECT response FROM operations WHERE id=?', ('old-op',)).fetchone()[0] == '{"id": "m"}'
             assert app.db.execute('SELECT data FROM versions WHERE roadmap_id=?', ('r',)).fetchone()[0] == '{"objective": "Old plan", "tasks": []}'
@@ -269,19 +320,101 @@ def test_v2_upgrade_preserves_records_operations_and_snapshots_only_canonical(tm
     app.close()
     db = sqlite3.connect(tmp_path / 'app' / 'application.sqlite3')
     db.execute('DROP TABLE canonical_message_placements')
+    db.execute('DROP TABLE recent_opens')
+    db.execute('DROP TABLE workspace_operations')
+    db.execute('DROP TABLE project_intents')
+    db.execute('DROP TABLE project_bindings')
     db.execute('PRAGMA user_version=2'); db.commit(); db.close()
     app = ApplicationStore(tmp_path / 'app', nb)
     try:
         with app.transaction():
-            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 3
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 6
             assert not app.db.execute('PRAGMA foreign_key_check').fetchall()
             assert app.db.execute('SELECT * FROM records WHERE id=?', (old['id'],)).fetchone() == raw
         assert app.listing('message', parent=c['id'])['items'][0]['data']['placement_after_cell_id'] == anchor
         assert 'placement_after_cell_id' not in app.listing('message', parent=legacy['id'])['items'][0]['data']
         assert historical['id'] != old['id']
         assert app.message_append(c['id'], sent_body) == sent
+        assert app.record_notebook_open(nid)['notebook_id'] == nid
         with pytest.raises(sqlite3.IntegrityError):
             with app.transaction(): app.db.execute("UPDATE records SET data='{}' WHERE id=?", (old['id'],))
+    finally:
+        app.close(); nb.close()
+
+
+def test_v3_upgrade_preserves_existing_rows_and_notebook_bytes(tmp_path):
+    nb = NotebookStore(tmp_path / 'docs')
+    doc = nb.create('Saved'); nid = doc['metadata']['europa']['notebook_id']
+    before = (tmp_path / 'docs' / (nid + '.ipynb')).read_bytes()
+    app = ApplicationStore(tmp_path / 'app', nb)
+    c = app.ensure_notebook_conversation(nid)
+    msg = app.message_append(c['id'], m.MessageCreate(operation_id=op(), content='Existing'))
+    with app.transaction():
+        records = [tuple(row) for row in app.db.execute('SELECT * FROM records ORDER BY sequence')]
+        operations = [tuple(row) for row in app.db.execute('SELECT * FROM operations ORDER BY id')]
+    app.close()
+    db = sqlite3.connect(tmp_path / 'app' / 'application.sqlite3')
+    db.execute('DROP TABLE recent_opens')
+    db.execute('DROP TABLE workspace_operations')
+    db.execute('DROP TABLE project_intents')
+    db.execute('DROP TABLE project_bindings')
+    db.execute('PRAGMA user_version=3'); db.commit(); db.close()
+    app = ApplicationStore(tmp_path / 'app', nb)
+    try:
+        with app.transaction():
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 6
+            assert not app.db.execute('PRAGMA foreign_key_check').fetchall()
+            assert [tuple(row) for row in app.db.execute('SELECT * FROM records ORDER BY sequence')] == records
+            assert [tuple(row) for row in app.db.execute('SELECT * FROM operations ORDER BY id')] == operations
+        assert app.get(msg['id'], 'message')['data']['content'] == 'Existing'
+        assert app.recent_notebooks() == []
+        assert app.record_notebook_open(nid)['notebook_id'] == nid
+        assert (tmp_path / 'docs' / (nid + '.ipynb')).read_bytes() == before
+    finally:
+        app.close(); nb.close()
+
+
+def test_v4_upgrade_keeps_application_records_and_private_notebooks(tmp_path):
+    nb = NotebookStore(tmp_path / 'docs')
+    app = ApplicationStore(tmp_path / 'app', nb)
+    p = project(app)
+    before = (tmp_path / 'app' / 'application.sqlite3').stat().st_mode & 0o777
+    with app.transaction():
+        previous = tuple(app.db.execute('SELECT * FROM records WHERE id=?', (p['id'],)).fetchone())
+    app.close()
+    db = sqlite3.connect(tmp_path / 'app' / 'application.sqlite3')
+    db.execute('DROP TABLE workspace_operations')
+    db.execute('DROP TABLE project_intents')
+    db.execute('DROP TABLE project_bindings')
+    db.execute('PRAGMA user_version=4'); db.commit(); db.close()
+    app = ApplicationStore(tmp_path / 'app', nb)
+    try:
+        with app.transaction():
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 6
+            assert tuple(app.db.execute('SELECT * FROM records WHERE id=?', (p['id'],)).fetchone()) == previous
+            assert app.db.execute("SELECT 1 FROM sqlite_master WHERE name='workspace_operations'").fetchone()
+        assert (tmp_path / 'app' / 'application.sqlite3').stat().st_mode & 0o777 == before == 0o600
+    finally:
+        app.close(); nb.close()
+
+
+def test_v5_upgrade_adds_project_bindings_without_touching_legacy_records(tmp_path):
+    nb = NotebookStore(tmp_path / 'docs')
+    app = ApplicationStore(tmp_path / 'app', nb)
+    old = project(app)
+    app.close()
+    db = sqlite3.connect(tmp_path / 'app' / 'application.sqlite3')
+    db.execute('DROP TABLE project_bindings') if db.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='project_bindings'").fetchone() else None
+    db.execute('DROP TABLE project_intents') if db.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='project_intents'").fetchone() else None
+    db.execute('PRAGMA user_version=5'); db.commit(); db.close()
+    app = ApplicationStore(tmp_path / 'app', nb)
+    try:
+        assert app.get(old['id'], 'project') == old
+        with app.transaction():
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 6
+            assert app.db.execute('SELECT count(*) FROM project_bindings').fetchone()[0] == 0
     finally:
         app.close(); nb.close()
 

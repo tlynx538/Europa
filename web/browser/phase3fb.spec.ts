@@ -1,9 +1,9 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
+import { expect, test, type APIRequestContext, type Page } from '../browserFixtures'
 import { resolve } from 'node:path'
 import { mkdirSync } from 'node:fs'
 
 const api = `http://127.0.0.1:${process.env.EUROPA_TEST_PORT || '18000'}/api`
-const screenshot = (name: string) => { const dir = resolve(process.cwd(), '../docs/screenshots/phase3g/after'); mkdirSync(dir, { recursive: true }); return resolve(dir, `legacy-3fb-${name}`) }
+const screenshot = (name: string) => { const dir = resolve(process.cwd(), process.env.EUROPA_CAPTURE_ROOT ? `${process.env.EUROPA_CAPTURE_ROOT}/legacy` : '../docs/screenshots/phase3g/after'); mkdirSync(dir, { recursive: true }); return resolve(dir, `legacy-3fb-${name}`) }
 const trigger = (page: Page, name: string) => page.getByRole('menubar').getByRole('menuitem', { name, exact: true })
 async function chooseTheme(page: Page, theme: 'dark' | 'light') {
   await trigger(page, 'View').click()
@@ -86,11 +86,14 @@ test('project browser, project detail and notebook library survive direct refres
   await expect(page).toHaveURL(new RegExp(`/projects/${project.id}$`))
   await expect(page.getByRole('heading', { name: 'Phase 3F B project' })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Phase 3F B notebook' })).toBeVisible()
+  await page.getByText('Project details and history', { exact: true }).click()
   await expect(page.getByText(/^Validate UI · 0%/)).toBeVisible()
   await page.reload()
   await expect(page.getByRole('heading', { name: 'Phase 3F B project' })).toBeVisible()
   await page.screenshot({ path: screenshot('project-detail.png'), fullPage: true })
-  await page.getByRole('link', { name: 'Notebooks', exact: true }).click()
+  await page.getByRole('link', { name: 'Europa', exact: true }).click()
+  await page.getByRole('menubar').getByRole('menuitem', { name: 'File', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Existing catalog notebooks', exact: true }).click()
   await expect(page).toHaveURL(/\/notebooks$/)
   await expect(page.getByRole('link', { name: 'Phase 3F B notebook' })).toBeVisible()
   await page.getByRole('searchbox', { name: 'Search notebooks' }).fill('Phase 3F B notebook')
@@ -211,7 +214,7 @@ test('notebook canvas uses input/output gutters and markdown command/edit modes'
   await page.goto(`/notebooks/${id}`)
   await expect(page.locator('.cell')).toHaveCount(2)
   await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeHidden()
-  await expect(page.locator('.notebook-chrome-title a')).toHaveCount(0)
+  await expect(page.locator('.notebook-chrome-title').getByRole('link', { name: 'Europa', exact: true })).toHaveAttribute('href', '/')
   await expect(page.getByRole('menubar').getByRole('menuitem')).toHaveText(['File', 'Edit', 'View', 'Run', 'Kernel', 'Help'])
   await expect(page.locator('.cell').first().locator('.cell-gutter').first()).toContainText('In [ ]:')
   await expect(page.locator('.cell').first().locator('.cm-gutters')).toHaveCount(0)

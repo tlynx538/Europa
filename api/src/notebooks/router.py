@@ -74,9 +74,19 @@ async def listing(request: Request):
     return await asyncio.to_thread(store(request).list)
 
 
+@router.get('/recent')
+async def recent(request: Request, limit: Annotated[int, Query(ge=1, le=20)] = 20):
+    return {'items': await asyncio.to_thread(request.app.state.application_store.recent_notebooks, limit=limit)}
+
+
 @router.get('/{notebook}')
 async def opened(notebook: str, request: Request):
     return await asyncio.to_thread(store(request).open, notebook)
+
+
+@router.post('/{notebook}/opened')
+async def record_open(notebook: str, request: Request):
+    return await asyncio.to_thread(request.app.state.application_store.record_notebook_open, notebook)
 
 
 @router.put('/{notebook}')

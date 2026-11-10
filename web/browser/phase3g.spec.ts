@@ -1,10 +1,10 @@
-import { expect, test, type APIRequestContext, type Page, type TestInfo } from '@playwright/test'
+import { expect, test, type APIRequestContext, type Page, type TestInfo } from '../browserFixtures'
 import { mkdirSync, readFileSync, realpathSync, writeFileSync, rmSync } from 'node:fs'
 import { resolve, join } from 'node:path'
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/phase3g.json', import.meta.url), 'utf8')) as Record<string, string>
 
 const api = `http://127.0.0.1:${process.env.EUROPA_TEST_PORT || '18000'}/api`
-const output = resolve(process.cwd(), '../docs/screenshots/phase3g', process.env.EUROPA_PHASE3G_CAPTURE || 'after')
+const output = process.env.EUROPA_CAPTURE_ROOT ? resolve(process.env.EUROPA_CAPTURE_ROOT, 'notebook') : resolve(process.cwd(), '../docs/screenshots/phase3g', process.env.EUROPA_PHASE3G_CAPTURE || 'after')
 const toolbar = (page: Page) => page.getByRole('toolbar', { name: 'Notebook commands' })
 type Receipt = { execution_id: string; cell_id: string; state: string; result?: { status: string } }
 
@@ -222,8 +222,9 @@ test('real execution visual baseline: notebook, MIME outputs, panels, menus and 
   await toggleRoadmap(page)
   await capture(page, info, 'mixed-stream-1440x900')
   const desktopChrome = await page.evaluate(() => ({ width: innerWidth, height: innerHeight, header: document.querySelector('.appbar')!.getBoundingClientRect().toJSON(), footer: document.querySelector('footer.status')!.getBoundingClientRect().toJSON(), title: document.querySelector('.notebook-chrome-title')!.getBoundingClientRect().toJSON(), heading: document.querySelector('.notebook-chrome-title h1')!.getBoundingClientRect().toJSON(), links: document.querySelectorAll('.notebook-chrome-title a').length }))
-  expect(desktopChrome.links).toBe(0)
-  expect(desktopChrome.heading.left).toBe(desktopChrome.title.left)
+  expect(desktopChrome.links).toBeGreaterThanOrEqual(2)
+  await expect(page.locator('.notebook-chrome-title').getByRole('link', { name: 'Europa', exact: true })).toHaveAttribute('href', '/')
+  expect(desktopChrome.heading.left).toBeGreaterThanOrEqual(desktopChrome.title.left)
   expect(desktopChrome.header.left).toBe(0)
   expect(desktopChrome.header.right).toBe(desktopChrome.width)
   expect(desktopChrome.footer.left).toBe(0)
@@ -261,6 +262,7 @@ test('real execution visual baseline: notebook, MIME outputs, panels, menus and 
   await expect(page.getByRole('dialog', { name: 'Project and roadmap' })).toBeVisible()
   await capture(page, info, 'roadmap-drawer-390x844')
   await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog', { name: 'Project and roadmap' })).not.toBeVisible()
   await page.getByLabel('Message', { exact: true }).focus()
   await expect(page.getByLabel('Message', { exact: true })).toBeFocused()
   await capture(page, info, 'composer-390x844')

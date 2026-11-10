@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ActivityPage, NotebookLibrary, ProjectDetail, ProjectsPage } from './Pages'
 
 afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
@@ -82,6 +82,23 @@ it('shows project association and standalone notebook status', async () => {
   render(<NotebookLibrary navigate={async () => true} />)
   expect(await screen.findByText('Research')).toBeTruthy()
   expect(screen.getByText('Standalone')).toBeTruthy()
+})
+
+it('searches and sorts the folder files while keeping project history in a closed disclosure', async () => {
+  vi.stubGlobal('fetch', async (url: string) => new Response(JSON.stringify(url.endsWith('/projects/one') ? { id: 'one', revision: 1, data: { title: 'One', status: 'active', notebooks: [{ notebook_id: 'a', present: true }, { notebook_id: 'b', present: true }] } }
+    : url.endsWith('/notebooks') ? [{ notebook_id: 'a', title: 'Alpha', revision: 1 }, { notebook_id: 'b', title: 'Beta', revision: 2 }]
+      : { items: url.includes('/activities') ? [{ id: 'event', created_at: 1700000000, data: { summary: 'Reviewed', result: 'done' } }] : [], next_cursor: null })))
+  render(<ProjectDetail id="one" navigate={async () => true} />)
+  const folder = await screen.findByRole('region', { name: 'Notebooks' })
+  expect(within(folder).getAllByRole('link').map(a => a.textContent)).toEqual(['Alpha', 'Beta'])
+  fireEvent.change(screen.getByRole('combobox', { name: 'Sort project notebooks' }), { target: { value: 'title-desc' } })
+  expect(within(folder).getAllByRole('link').map(a => a.textContent)).toEqual(['Beta', 'Alpha'])
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Search project notebooks' }), { target: { value: 'missing' } })
+  expect(within(folder).queryAllByRole('link')).toHaveLength(0)
+  expect(within(folder).getByText(/No notebooks match/)).toBeTruthy()
+  const details = screen.getByText('Project details and history').closest('details')!
+  expect(details.hasAttribute('open')).toBe(false)
+  expect(details.textContent).toMatch(/Reviewed/)
 })
 
 it('sorts notebook records and shows saved revision metadata in the notebook browser', async () => {

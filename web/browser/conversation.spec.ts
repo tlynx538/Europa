@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
+import { expect, test, type APIRequestContext, type Page } from '../browserFixtures'
 
 const api = `http://127.0.0.1:${process.env.EUROPA_TEST_PORT || '18000'}/api`
 async function create(request: APIRequestContext, title: string) {

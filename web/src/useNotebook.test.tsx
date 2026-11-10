@@ -197,3 +197,48 @@ describe('revision-aware notebook controller', () => {
     expect(hook.result.current.paused).toBe(false)
   })
 })
+
+it('does not let a delayed poll regress a revision after an acknowledged save', async () => {
+  vi.useFakeTimers()
+  let saved = document(), reads = 0
+  let release!: (response: Response) => void
+  const oldPoll = new Promise<Response>(resolve => { release = resolve })
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/cells/cell') && init?.method === 'PATCH') {
+      saved = { ...saved, metadata: { europa: { ...saved.metadata.europa, revision: 3 } }, cells: saved.cells.map(cell => ({ ...cell, source: 'saved edit' })) }
+      return new Response(JSON.stringify(saved))
+    }
+    if (url === '/api/notebooks/nb' && ++reads === 2) return oldPoll
+    return new Response(JSON.stringify(url.includes('/executions?') ? { items: [], next_offset: null } : url.endsWith('/session') ? { state: 'connected', kernels: 1 } : saved))
+  }))
+  const hook = renderHook(useNotebook)
+  await act(() => hook.result.current.open('nb'))
+  await act(async () => { await Promise.resolve() })
+  expect(reads).toBe(2)
+  act(() => { hook.result.current.setAutosave(false); hook.result.current.edit('cell', 'saved edit') })
+  await act(() => hook.result.current.save())
+  expect(hook.result.current.doc?.metadata.europa.revision).toBe(3)
+  await act(async () => { release(new Response(JSON.stringify(document()))) })
+  expect(hook.result.current.doc?.metadata.europa.revision).toBe(3)
+  expect(hook.result.current.doc?.cells[0].source).toBe('saved edit')
+})
+
+it('does not let a pre-submission history snapshot erase an accepted pending receipt', async () => {
+  vi.useFakeTimers()
+  let release!: (response: Response) => void
+  const oldHistory = new Promise<Response>(resolve => { release = resolve })
+  const fetcher = vi.fn(async (url: string) => {
+    if (url.includes('/executions?')) return oldHistory
+    if (url.endsWith('/execute')) return new Response(JSON.stringify({ execution_id: 'owned', notebook_id: 'nb', cell_id: 'cell', state: 'running' }))
+    return new Response(JSON.stringify(url.endsWith('/session') ? { state: 'connected', kernels: 1 } : document()))
+  })
+  vi.stubGlobal('fetch', fetcher)
+  const hook = renderHook(useNotebook)
+  await act(() => hook.result.current.open('nb'))
+  await act(() => hook.result.current.execute('cell'))
+  expect(hook.result.current.active).toBe(true)
+  await act(async () => { release(new Response(JSON.stringify({ items: [], next_offset: null }))) })
+  expect(hook.result.current.active).toBe(true)
+  await act(async () => { expect(await hook.result.current.open('other')).toBeNull() })
+  expect(fetcher.mock.calls.some(([url]) => url === '/api/notebooks/other')).toBe(false)
+})

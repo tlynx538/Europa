@@ -2,9 +2,13 @@
 .navigation-bar { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem 1rem; padding: .65rem clamp(1rem, 3vw, 2rem); border-bottom: 1px solid var(--line, #cbd5e1); background: var(--surface, white); }
 .navigation:has(.notebook-editor) > .navigation-bar { display: none; }
 .navigation-bar strong { margin-right: 1rem; font-size: 1.2rem; letter-spacing: -.025em; }
+.navigation-bar > a:first-child { margin-right: 1rem; font-size: 1.2rem; font-weight: 700; letter-spacing: -.025em; }
 .navigation-bar a { color: var(--ink, #17202a); text-decoration: none; padding: .45rem .65rem; border-radius: 5px; }
 .navigation-bar a:hover, .navigation-bar a[aria-current="page"] { color: var(--accent, #2563eb); background: var(--tint, #eff6ff); }
 .navigation-bar a[aria-current="page"] { font-weight: 650; }
+.navigation-secondary { margin-left: auto; display: flex; flex-wrap: wrap; gap: .35rem; font-size: .8rem; color: var(--muted); }
+.navigation-secondary a { color: var(--muted, #64748b); }
+.navigation-secondary button:disabled { opacity: .65; cursor: not-allowed; font-size: .8rem; }
 .navigation .browser-page { max-width: 880px; margin: 0 auto; padding: clamp(1.25rem, 3vw, 2.25rem) clamp(1rem, 3vw, 2rem) 5rem; }
 .browser-page h1 { margin: 0 0 1.25rem; }
 .browser-page h2 { margin: 1.75rem 0 .65rem; }
@@ -43,3 +47,38 @@
 .activity-timeline time, .activity-links { display: block; margin-top: 3px; font-size: 12px; color: var(--muted); }
 .activity-links { display: flex; flex-wrap: wrap; gap: 4px 12px; }
 @media (max-width: 600px) { .browser-list li > a:first-child { flex-basis: 100%; } .browser-page .browser-filters label { margin: 8px 0; } }
+.home-page .home-actions, .home-page .browser-filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: end; margin: 14px 0; }
+.home-page { max-width: 760px !important; }
+.home-page > h2 { font-size: 1rem; margin: 2rem 0 .6rem; }
+.home-page .home-actions { margin: .5rem 0 1.5rem; }
+.home-page [aria-label="Browse"] { border-top: 1px solid var(--line); padding-top: 1rem; }
+.workspace-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin: 1.25rem 0; }
+.workspace-browse .browser-list li { justify-content: space-between; }
+.workspace-browse .browser-list button { text-align: left; color: var(--ink); background: transparent; border: 0; cursor: pointer; font: inherit; }
+.workspace-browse .browser-list button:hover { color: var(--accent); text-decoration: underline; }
+.workspace-browse .browser-list small { color: var(--muted); }
+.text-file-editor textarea { display: block; width: 100%; min-height: 45vh; margin: .5rem 0 1rem; padding: .75rem; resize: vertical; color: var(--ink); background: var(--surface); border: 1px solid var(--line); font: 13px/1.5 ui-monospace, monospace; }
+.home-page .browser-filters label { flex: 1 1 210px; margin: 0; }
+.home-page section { margin: 14px 0 22px; }
+.home-page section h2 { font-size: 15px; margin: 0; }
+.home-page .browser-list { margin: 6px 0; }
+.home-page .browser-list li { min-height: 42px; }
+.home-page time, .home-page .browser-list li > span:not(:first-child) { color: var(--muted); font-size: 12px; }
+.navigation:has(.notebook-editor) > .alert { position: fixed; z-index: 9; top: var(--appbar-height, 0px); right: 14px; max-width: min(480px, calc(100vw - 28px)); box-shadow: 0 4px 18px #0003; }
+.browser-icon { display: inline-block; width: 17px; height: 17px; margin-right: 9px; vertical-align: -.2em; background: currentColor; opacity: .7; }
+.browser-icon-folder { clip-path: polygon(0 18%, 38% 18%, 46% 31%, 100% 31%, 100% 88%, 0 88%); }
+.browser-icon-file { clip-path: polygon(8% 0, 62% 0, 93% 30%, 93% 100%, 8% 100%); }
+.runtime-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--muted, #64748b); vertical-align: .1em; }
+.recent-labels, .recent-list li { display: grid; grid-template-columns: minmax(110px, 2fr) minmax(85px, 1fr) minmax(115px, 1.5fr) minmax(95px, 1fr); gap: 8px; }
+.recent-labels { color: var(--muted); font-size: 11px; padding: 6px 8px; }
+.recent-list li > a:first-child, .recent-list li > span:first-child { min-width: 0; overflow-wrap: anywhere; margin: 0; }
+.project-details { border-top: 1px solid var(--line); margin-top: 24px; padding: 12px 8px; }
+.project-details summary { cursor: pointer; font-weight: 600; }
+#project-notebooks .browser-filters { display: flex; flex-wrap: wrap; gap: 10px; }
+#project-notebooks .browser-filters label { flex: 1 1 180px; }
+@media (max-width: 600px) {
+  .recent-labels { display: none; }
+  .recent-list li { grid-template-columns: minmax(0, 1fr) auto; }
+  .recent-list li > * { min-width: 0; }
+  .navigation-secondary { margin-left: 0; }
+}

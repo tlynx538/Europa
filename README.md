@@ -113,7 +113,8 @@ Do not bind Europa to a public or LAN address. It has no end-user authentication
 
 ## Try a notebook
 
-1. Open **Notebooks** and select **New notebook**; enter a title.
+1. In **Files**, browse to a directory and select **New → Notebook · Python 3**;
+   enter a filename. Existing physical `.ipynb` files open the same notebook editor.
 2. In the notebook editor, add a code cell using the notebook toolbar.
 3. Enter:
 
@@ -137,7 +138,18 @@ Useful editor shortcuts:
 | Copy/paste a cell within Europa (command mode) | C / V |
 | Change selected cell to Markdown/code (command mode) | M / Y |
 
-Use **File → Open project** or **Open notebook** to switch workspaces. Project
+Europa opens to the Phase 3H Files dashboard. The Europa wordmark
+returns Home through the existing draft/receipt guard; **File → Close Notebook**
+returns to the verified source directory. Neither action shuts down a kernel.
+**File → Existing catalog projects / notebooks** retains access to private data
+without migration. The Recent menu uses persisted open history. Running shows
+bounded, read-only observations of managed notebooks and their kernels, including
+Stopped, Unknown and Needs attention. Kernel shutdown remains unavailable in the
+dashboard. See the [checkpoint validation](docs/phase3h-home-dashboard-validation.md)
+and [final validation](docs/phase3h-final-validation.md) for status evidence,
+refresh limits, regression results and infrastructure limitations.
+
+Use **File → Open project** or **Open notebook** in the editor to switch workspaces. Project
 overviews show their linked notebooks. **View → Roadmap panel** toggles the left
 planning outline. Each notebook has one automatically restored conversation in
 its canvas and a composer above the status footer, including standalone notebooks.
@@ -175,6 +187,7 @@ Important environment variables include:
 | Variable | Purpose |
 |---|---|
 | `EUROPA_NOTEBOOK_ROOT` | Private notebook and receipt storage |
+| `EUROPA_WORKSPACE_ROOT` | Pinned physical file-browser root; defaults to launch directory |
 | `EUROPA_APPLICATION_ROOT` | Private SQLite application storage |
 | `EUROPA_RUNTIME_PROVIDER` | Runtime provider (`local` by default, optional `containerd`) |
 | `EUROPA_RUNTIME_REGISTRY` | Durable containerd ownership registry |
