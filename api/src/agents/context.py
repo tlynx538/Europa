@@ -37,6 +37,10 @@ class ContextManager:
                 roadmaps = app.db.execute("SELECT id,revision,notebook_id,data FROM records WHERE kind='roadmap' AND project_id=? AND (notebook_id IS NULL OR notebook_id=?) ORDER BY sequence DESC LIMIT 3", (project, run['scope']['resource_id'] if run['scope']['kind']=='notebook' else None)).fetchall()
                 data['roadmaps'] = [{'id': r['id'], 'revision': r['revision'], 'notebook_id': r['notebook_id'],
                                      'objective': clip(json.loads(r['data'])['objective'], 400)} for r in roadmaps]
+                if 'roadmap.plan' in run['grant_json']['capabilities']:
+                    data['planning_target'] = {'notebook_id': run['scope']['resource_id'],
+                        'revision': doc['metadata']['europa']['revision'],
+                        'roadmaps': [{k:r[k] for k in ('id','revision')} for r in roadmaps if r['notebook_id'] == run['scope']['resource_id']]}
             if doc is not None:
                 data['notebook'] = {'identity': {k: doc['metadata']['europa'][k] for k in ('notebook_id','title','revision')}, 'cell_count': len(doc['cells']),
                                     'cells': [preview_cell(c, 300) for c in doc['cells'][:3]], 'truncated': len(doc['cells'])>3}
@@ -72,6 +76,9 @@ class ContextManager:
         effects = data.pop('confirmed_effects')
         required = {'role': 'user', 'content': 'Verified effect outcomes: ' + encoded(redactor.value(effects))}
         prefix = [first] + ([required] if effects else [])
+        target = data.pop('planning_target', None)
+        if target:
+            prefix.append({'role':'user', 'content':'Notebook planning target: ' + encoded(redactor.value(target))})
         cost = lambda items: len(encoded({'messages': items, 'tools': definitions}).encode()) + 128
         if cost([*prefix,current]) > budget: raise AgentFault('Current request and verified effects exceed context budget', 409)
         tail = []

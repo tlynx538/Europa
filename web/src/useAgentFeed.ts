@@ -5,7 +5,7 @@ import type { Message, RecordData } from './applicationApi'
 type Feed = { config?: AgentConfig; conversation?: string; runs: AgentRun[]; messages: RecordData<Message>[]; handoffs: Handoff[]; before: number | null; error: string }
 const empty: Feed = {runs:[],messages:[],handoffs:[],before:null,error:''}
 
-export function useAgentFeed(scope: AgentScope, enabled: boolean) {
+export function useAgentFeed(scope: AgentScope, enabled: boolean, knownConversation?: string) {
   const key = JSON.stringify(scope)
   const [feed, setFeed] = useState<Feed>(empty)
   const [older, setOlder] = useState<RecordData<Message>[]>([])
@@ -18,9 +18,9 @@ export function useAgentFeed(scope: AgentScope, enabled: boolean) {
     const { signal } = controller
     let timer: ReturnType<typeof setTimeout>
     async function start() {
-      const [config, conversation] = await Promise.all([agentConfig(signal),agentConversation(JSON.parse(key),signal)])
+      const [config, conversation] = await Promise.all([agentConfig(signal),knownConversation ? {id:knownConversation} : agentConversation(JSON.parse(key),signal)])
       for (let attempt = 0; !signal.aborted; attempt++) {
-        const [runs,messages,handoffs] = await Promise.all([agentRuns(conversation.id,signal),agentMessages(conversation.id,0,signal),agentHandoffs(conversation.id,signal)])
+        const [runs,messages,handoffs] = await Promise.all([agentRuns(conversation.id,signal),agentMessages(conversation.id,0,signal),knownConversation ? {items:[]} : agentHandoffs(conversation.id,signal)])
         if (signal.aborted) return
         const active = runs.items.some(run => liveRun(run.state))
         setFeed({config,conversation:conversation.id,runs:runs.items,messages:messages.items,handoffs:handoffs.items,before:messages.next_before,error:active && attempt>=120 ? 'Updates paused. Refresh to reconnect.' : ''})
@@ -34,7 +34,7 @@ export function useAgentFeed(scope: AgentScope, enabled: boolean) {
     }
     void start().catch(() => { if (!signal.aborted) setFeed(previous => ({...previous,error:'Conversation unavailable. Refresh to reconnect.'})) })
     return () => controller.abort()
-  }, [enabled,key,refresh])
+  }, [enabled,key,knownConversation,refresh])
   const before = olderCursor === undefined ? feed.before : olderCursor
   const loadOlder = async () => {
     if (!before || !feed.conversation) return

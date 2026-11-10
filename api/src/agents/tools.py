@@ -133,6 +133,11 @@ class PolicyEngine:
                 if not grant['project_id'] or roadmap['project_id'] != grant['project_id'] or (roadmap['notebook_id'] and roadmap['notebook_id'] not in grant['notebooks']):
                     raise AgentFault('Roadmap is outside this run grant', 403)
                 target['roadmap_id'] = args.roadmap_id
+            if tool.target_type == 'notebook_roadmap' and args.roadmap_id:
+                roadmap = self.store.app._row(args.roadmap_id, 'roadmap')
+                if (roadmap['project_id'], roadmap['notebook_id']) != (grant['project_id'], notebook):
+                    raise AgentFault('Roadmap is outside this notebook grant', 403)
+                target.update(roadmap_id=args.roadmap_id, roadmap_revision=args.roadmap_revision)
             for key in ('revision','cell_id'):
                 value = getattr(args, key, None)
                 if value is not None: target[key] = value

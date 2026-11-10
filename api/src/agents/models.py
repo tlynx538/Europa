@@ -41,10 +41,17 @@ class RunCreate(Model):
     content: str = Field(min_length=1, max_length=8000)
     authorized_notebooks: list[Identity] = Field(default_factory=list, max_length=20)
     budgets: Budgets = Field(default_factory=Budgets)
+    cell_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{1,64}$')
+    document_revision: StrictInt | None = Field(default=None, ge=1)
+    parent_id: Identity | None = None
 
     @model_validator(mode='after')
     def nonblank(self):
         if not self.content.strip(): raise ValueError('Message is blank')
+        if (self.cell_id is None) != (self.document_revision is None):
+            raise ValueError('A cell reference requires its document revision')
+        if self.scope.kind != 'notebook' and (self.cell_id or self.parent_id):
+            raise ValueError('Agent message references require notebook scope')
         return self
 
 

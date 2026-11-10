@@ -174,3 +174,58 @@ Final logs are `4b-ready-target.log`, `4b-python-final.log`,
 The final runtime change affects only authenticated kernel readiness in
 `api/src/kernel/gateway_client.py` and its protocol coverage. The previously
 validated frontend production build and unit-test candidate are identical.
+
+## Checkpoint 4C
+
+Starting commit `3f7413b` (validated 4B).
+
+The existing notebook composer has a separate Ask Coordinator action. It
+stores the user's message in the same canonical notebook conversation, with
+an optional same-scope reply or cell reference. Run status, the structured
+proposal and the reply appear in the existing canvas. The existing roadmap
+panel renders the committed plan. Browser reconnect reuses the canonical
+conversation and the resumable agent run and event APIs.
+
+The `/api/agents/runs` create body accepts optional `parent_id`, `cell_id` and
+`document_revision`. Omitted values preserve prior idempotency fingerprints.
+Notebook coordinate mode grants `roadmap.plan` only to a notebook with active
+project membership. No database schema change. The new registered tool
+`save_notebook_plan` validates bounded task IDs, criteria and dependency order.
+Approval covers the complete proposal, notebook revision, and existing roadmap
+ID and revision when applicable. ApplicationStore commits the approved plan
+with its existing version and operation journal. A revision conflict rejects
+the proposal, and the tool preserves tasks with recorded progress. New tasks
+are pending and carry no invented evidence.
+
+Changed files: agent context, ingress models, planning tool, fake provider,
+runtime, store and policy; notebook conversation composer, Workspace, agent
+activity and feed, application record types and styles; focused Python and Chrome
+tests and screenshots. Planning on a notebook without project membership remains
+discussion-only. The initial plan editor accepts one notebook-specific roadmap
+at a time and up to twelve tasks per proposal. Existing project-wide roadmaps
+are readable within scope and retain their existing owner controls.
+
+The focused tests verify the canonical message and cell reference, visible
+authorized context, persisted task dependencies, revision conflicts, and
+cross-notebook isolation. The browser journey captures a pending plan, restarts
+the disposable backend, approves it, and reopens the saved conversation and
+roadmap. Inspected captures include the
+[desktop proposal](screenshots/phase4/4c/notebook-approval-desktop.png) and
+[mobile conversation](screenshots/phase4/4c/notebook-plan-mobile.png).
+The [mobile roadmap](screenshots/phase4/4c/notebook-roadmap-mobile.png) shows the
+four persisted tasks still upcoming after approval.
+
+| Command | Exit | Result |
+| --- | --- | --- |
+| `.venv/bin/python -m pytest tests/test_agents_planning.py tests/test_agents_home.py tests/test_agents_foundation.py tests/test_application.py -q` | 0 | 94 passed |
+| `.venv/bin/python -m pytest tests/test_agents_planning.py -q` | 0 | 3 passed, including the final output-context assertion |
+| `.venv/bin/python -m pytest --run-local-gateway -q -ra` | 0 | 365 passed, 79 Linux/containerd skips |
+| `npm test -- --maxWorkers=1` (Node 24, `web/`) | 0 | 94 passed across 17 files |
+| `npm run build` (`web/`) | 0 | production build passed |
+| `npx playwright test --project=agents --grep '4C:' --workers=1 --retries=0` | 0 | 1 passed |
+| `npx playwright test --workers=1 --retries=0 --reporter=line,json` | 0 | 59 passed, 1 ARM64 skip, 3.5 min |
+
+An initial isolation test supplied a stale project revision when creating the
+second membership. The fixture now uses the current project revision. No
+revision check changed. Logs and the Chrome report are under
+`/private/tmp/europa-phase4-validation/4c-*`.

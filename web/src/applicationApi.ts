@@ -1,6 +1,6 @@
 import { ApiError, json, request } from './api'
 
-export interface RecordData<T> { id: string; revision: number; notebook_id: string | null; created_at: number; data: T }
+export interface RecordData<T> { id: string; revision: number; notebook_id: string | null; created_at: number; sequence?: number; data: T }
 export interface Links { notebook_id?: string | null; cell_id?: string | null; task_id?: string | null; message_id?: string | null; document_revision?: number | null; execution_receipt_id?: string | null }
 export type TaskStatus = 'pending' | 'in_progress' | 'blocked' | 'needs_input' | 'completed' | 'cancelled'
 export interface Task { id: string; title: string; acceptance_criteria: string[]; parent_id: string | null; dependencies: string[]; status: TaskStatus; explanation: string | null; weight: number; links: Links; evidence: { summary: string; message_id?: string | null; execution_receipt_id?: string | null }[]; accepted: boolean }

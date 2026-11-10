@@ -6,6 +6,7 @@ import time
 from agents.context import ContextManager, bounded
 from agents.home import HomeTools, PartialEffect, UncertainEffect
 from agents.models import ModelReply
+from agents.planning import NotebookPlanning
 from agents.providers import DisabledProvider, ProviderFailure, Redactor, configured_provider
 from agents.store import AgentFault, AgentStore, FenceLost, digest, identity
 from agents.tools import PolicyEngine, ReadTools, ToolRegistry
@@ -26,7 +27,8 @@ class AgentRuntime:
         self.store = AgentStore(state.application_store, state.workspace, self.redactor)
         self.context = ContextManager(self.store)
         self.policy = PolicyEngine(self.store)
-        self.registry = ToolRegistry([*ReadTools(self.store).declarations(), HomeTools(self.store,state).declaration()])
+        self.registry = ToolRegistry([*ReadTools(self.store).declarations(), HomeTools(self.store,state).declaration(),
+                                      NotebookPlanning(self.store).declaration()])
         self.owner, self.wake = identity(), asyncio.Event()
         self.worker, self.closing = None, False
         self.inflight = set()
@@ -170,6 +172,6 @@ class AgentRuntime:
         except (AgentFault, NotebookError, WorkspaceError) as exc:
             definitive = exc.status_code < 500
             await asyncio.to_thread(self.store.end_call, *key, call['id'], 'failed' if definitive or tool.classification=='read' else 'uncertain',
-                                    error='Tool target unavailable, invalid, or changed')
+                                    error=str(exc) if isinstance(exc, AgentFault) else 'Tool target unavailable, invalid, or changed')
         except Exception:
             await asyncio.to_thread(self.store.end_call, *key, call['id'], 'failed' if tool.classification=='read' else 'uncertain', error='Tool result unavailable')

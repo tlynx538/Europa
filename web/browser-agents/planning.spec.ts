@@ -1,0 +1,56 @@
+import { mkdirSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { test, expect } from '../browserFixtures'
+import { agentServer } from '../browserAgentServer'
+
+test('4C: canonical notebook plan and approval survive a backend restart', async ({page,request})=>{
+  const server = agentServer(request)
+  const captures = join(process.env.EUROPA_PHASE4_CAPTURE_ROOT || resolve('../docs/screenshots/phase4'),'4c')
+  mkdirSync(captures,{recursive:true})
+  try {
+    await server.start()
+    const project = await request.post(server.url+'/api/workspace/projects',{data:{path:'Study',operation_id:crypto.randomUUID()}})
+    expect(project.status()).toBe(201)
+    const created = await request.post(server.url+'/api/workspace/notebooks',{data:{path:'Study/Markov.ipynb',operation_id:crypto.randomUUID()}})
+    expect(created.status()).toBe(201)
+    const {notebook_id,project_id} = await created.json()
+    const url = server.url+'/notebooks/'+notebook_id
+    const canonical = await (await request.get(server.url+'/api/notebooks/'+notebook_id+'/conversation')).json()
+    await page.setViewportSize({width:1440,height:900})
+    await page.goto(url)
+    const objective = 'Plan a simple Markov chain notebook'
+    await page.getByRole('textbox',{name:'Message',exact:true}).fill(objective)
+    await page.getByRole('button',{name:'Ask Coordinator'}).click()
+    const review = page.getByRole('heading',{name:'Review proposed action'})
+    await expect(review).toBeVisible()
+    await expect(page.getByText('Define a transition matrix',{exact:true})).toBeVisible()
+    expect((await (await request.get(server.url+'/api/roadmaps?project_id='+project_id)).json()).items).toEqual([])
+    await review.scrollIntoViewIfNeeded()
+    await page.screenshot({path:join(captures,'notebook-approval-desktop.png')})
+    await server.stop(); await server.start()
+    await page.reload()
+    await expect(review).toBeVisible()
+    await page.getByRole('button',{name:'Approve exact action'}).click()
+    await expect(page.getByText('The approved roadmap is saved in this notebook.')).toBeVisible()
+    const history = await (await request.get(server.url+'/api/conversations/'+canonical.id+'/messages')).json()
+    expect(history.items.map((item:{data:{author_role:string}})=>item.data.author_role)).toEqual(['user','coordinator'])
+    const roadmaps = await (await request.get(server.url+'/api/roadmaps?project_id='+project_id)).json()
+    expect(roadmaps.items).toHaveLength(1)
+    expect(roadmaps.items[0].notebook_id).toBe(notebook_id)
+    expect(roadmaps.items[0].data.tasks).toHaveLength(4)
+    await page.setViewportSize({width:390,height:844})
+    await page.reload()
+    const reply = page.getByText('The approved roadmap is saved in this notebook.')
+    await expect(reply).toBeVisible()
+    await expect(page.getByRole('button',{name:'Coordinator · Completed'})).toBeVisible()
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
+    await reply.scrollIntoViewIfNeeded()
+    await page.screenshot({path:join(captures,'notebook-plan-mobile.png')})
+    await page.getByRole('menubar').getByRole('menuitem',{name:'View'}).click()
+    await page.getByRole('menuitemcheckbox',{name:'Roadmap panel'}).click()
+    const roadmap = page.locator('#roadmap')
+    await expect(roadmap.getByRole('button',{name:'Define a transition matrix'})).toBeVisible()
+    await expect(roadmap.getByText('upcoming',{exact:true})).toHaveCount(4)
+    await page.screenshot({path:join(captures,'notebook-roadmap-mobile.png')})
+  } finally { await server.stop() }
+})

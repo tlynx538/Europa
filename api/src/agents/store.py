@@ -161,7 +161,9 @@ class AgentStore:
 
     def create(self, body, provider):
         # Preserve exact v7 replay identity for the original read-only contract.
-        payload = body.model_dump(exclude={'mode'} if body.mode=='discuss' else set())
+        omitted = {key for key in ('cell_id','document_revision','parent_id') if getattr(body,key) is None}
+        if body.mode == 'discuss': omitted.add('mode')
+        payload = body.model_dump(exclude=omitted)
         with self.app.mutex:
             previous = self._replayed(body.operation_id, digest(['agent/create', payload]))
             if previous is not None: return previous
@@ -175,12 +177,15 @@ class AgentStore:
                 grant = self._grant(body.scope, body.authorized_notebooks)
                 if body.mode == 'coordinate' and body.scope.kind == 'workspace':
                     grant['capabilities'].append('workspace.create')
+                if body.mode == 'coordinate' and body.scope.kind == 'notebook' and grant['project_id']:
+                    grant['capabilities'].append('roadmap.plan')
                 run, now = identity(), time.time()
                 self.db.execute('''INSERT INTO agent_runs(id,conversation_id,role,scope,grant_json,budgets,provider,model,state,created_at,updated_at,deadline)
                     VALUES (?,?,'coordinator',?,?,?, ?,?,'queued',?,?,?)''',
                     (run, conversation['id'], encoded(body.scope.model_dump()), encoded(grant), encoded(body.budgets.model_dump()),
                      provider['provider'], provider['model'], now, now, now + body.budgets.wall_seconds))
-                message = self._message(self._run(run), body.content, 'user')
+                message = self._message(self._run(run), body.content, 'user', cell_id=body.cell_id,
+                                        document_revision=body.document_revision, parent_id=body.parent_id)
                 self._event(run, 'run_queued', message_id=message, provider=provider['provider'], model=provider['model'])
                 return {'id': run, 'conversation_id': conversation['id'], 'message_id': message}
             return self._operation(body.operation_id, 'agent/create', payload, work)

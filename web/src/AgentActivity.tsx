@@ -6,6 +6,14 @@ const text = (value:unknown) => typeof value === 'string' ? value : ''
 
 function Proposal({approval}: {approval:AgentApproval}) {
   if (approval.tool==='create_workspace_notebook') return <dl className="agent-proposal"><dt>Project directory</dt><dd>{text(approval.target.path)}</dd><dt>Notebook</dt><dd>{text(approval.target.notebook_path)}</dd><dt>Objective</dt><dd>{text(approval.arguments.objective)}</dd></dl>
+  if (approval.tool==='save_notebook_plan') {
+    const tasks = approval.arguments.tasks as {id:string;title:string;acceptance_criteria:string[];dependencies:string[];cell_id?:string}[]
+    return <div className="agent-plan"><p>{text(approval.arguments.objective)}</p>
+      <small>Notebook revision {String(approval.arguments.revision)} · {approval.arguments.roadmap_id ? `Replace plan at revision ${approval.arguments.roadmap_revision}` : 'Create roadmap'}</small>
+      <ol>{tasks.map(task=><li key={task.id}><strong>{task.title}</strong><ul>{task.acceptance_criteria.map((criterion,index)=><li key={index}>{criterion}</li>)}</ul>
+        {task.dependencies.length>0&&<small>After {task.dependencies.map(id=>tasks.find(t=>t.id===id)?.title??id).join(', ')}</small>}
+        {task.cell_id&&<a href={`#cell-${task.cell_id}`}>Linked cell</a>}</li>)}</ol></div>
+  }
   return <pre className="agent-payload">{JSON.stringify(approval.arguments,null,2)}</pre>
 }
 

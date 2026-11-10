@@ -110,6 +110,28 @@ class FakeProvider:
         calls = [m for m in messages if m['role'] == 'tool']
         names = {t['function']['name'] for t in tools}
         prompt = next(m['content'] for m in reversed(messages) if m['role']=='user')
+        if 'save_notebook_plan' in names:
+            if calls and any('save_notebook_plan' in str(m.get('tool_calls','')) for m in messages):
+                outcome = json.loads(calls[-1]['content'])
+                return ModelReply(content='The approved roadmap is saved in this notebook.' if outcome.get('state')=='completed'
+                                  else 'The roadmap was not changed. Review the recorded outcome before proposing a new plan.')
+            if not calls and any(word in prompt.lower() for word in ('markov','plan','roadmap')):
+                prefix = 'Notebook planning target: '
+                target = json.loads(next(m['content'][len(prefix):] for m in messages
+                                         if isinstance(m['content'],str) and m['content'].startswith(prefix)))
+                existing = next(iter(target.pop('roadmaps')), None)
+                steps = [('matrix','Define a transition matrix','Show a two-state matrix with rows summing to one.'),
+                         ('simulation','Simulate state transitions','Simulate transitions from a fixed seed.'),
+                         ('stationary','Estimate the stationary distribution','Report the empirical frequency of each state.'),
+                         ('convergence','Visualize convergence','Plot running state frequencies across iterations.')]
+                tasks = []
+                for key, title, criterion in steps:
+                    tasks.append({'id':target['notebook_id']+'-'+key,'title':title,'acceptance_criteria':[criterion],
+                                  'dependencies':[tasks[-1]['id']] if tasks else []})
+                if existing:
+                    target.update(roadmap_id=existing['id'],roadmap_revision=existing['revision'])
+                return ModelReply(content='This plan builds from transition probabilities to a visual check of long-run behavior.',
+                    calls=[ToolCall(id='notebook_plan',name='save_notebook_plan',arguments={**target,'objective':prompt[:1200],'tasks':tasks})])
         if calls and any('create_workspace_notebook' in str(m.get('tool_calls','')) for m in messages):
             outcome = json.loads(calls[-1]['content'])
             if outcome.get('state')=='completed':

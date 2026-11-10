@@ -7,6 +7,10 @@ import type { Navigate } from './Navigation'
 import { projectConversation } from './conversationProjection'
 import { ConversationComposer, clearSentDraft, type CellReference } from './ConversationComposer'
 import { InlineCommentComposer, clearSentCommentDraft } from './InlineCommentComposer'
+import { AgentActivity } from './AgentActivity'
+import { liveRun } from './agentApi'
+import { useAgentFeed } from './useAgentFeed'
+import './agents.css'
 
 type Canvas = { beforeCells: ReactNode; afterCell: (id: string) => ReactNode; history: ReactNode; composer: ReactNode; discussCell: (id: string) => void }
 type Props = { notebookId?: string; cells: { id: string; source?: string }[]; draftCells?: string[]; conflict?: boolean; selectedCell?: string; showActivity: boolean; revision?: number; navigate: Navigate; onOpenNotebook: (id: string, cell?: string) => Promise<boolean>; onCommentCounts: (counts: Record<string, number>) => void; renderNotebook?: (view: Canvas) => ReactNode }
@@ -17,6 +21,8 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
   const [roadmaps, setRoadmaps] = useState<RecordData<Roadmap>[]>([])
   const [canonicalConversation, setConversation] = useState<RecordData<Conversation> | null>(null)
   const conversation = canonicalConversation?.notebook_id === notebookId ? canonicalConversation : null
+  const agentFeed = useAgentFeed({kind:'notebook',resource_id:notebookId},!!conversation,conversation?.id)
+  const agentRuns = agentFeed.conversation === conversation?.id ? agentFeed.runs : []
   const [canonicalError, setCanonicalError] = useState('')
   const [legacy, setLegacy] = useState<{ conversation: RecordData<Conversation>; messages: RecordData<Message>[] }[]>([])
   const [messages, setMessages] = useState<RecordData<Message>[]>([]), [comments, setComments] = useState<RecordData<Comment>[]>([])
@@ -134,6 +140,10 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
   // A recovered message retry must wait for verified canonical scope after reload.
   const retryWaiting = /^\/conversations\/[^/]+\/messages$/.test(pendingMutation()?.path ?? '') && !conversation
   const member = project?.data.notebooks.some(n => n.notebook_id === notebookId && n.present)
+  const settledRuns = agentRuns.filter(item=>!liveRun(item.state)).map(item=>`${item.id}:${item.state}`).join(',')
+  useEffect(() => {
+    if (settledRuns && member && project?.id) void loadProject(project.id).catch(e=>setError(String(e)))
+  }, [settledRuns,member,project?.id,loadProject])
   const blankTask = (): Task => ({ id: crypto.randomUUID(), title: '', acceptance_criteria: [''], parent_id: null, dependencies: [], status: 'pending', explanation: null, weight: 1,
     links: member ? { notebook_id: notebookId, cell_id: selectedCell ?? null } : {}, evidence: [], accepted: false })
   const cellLabel = (id: string) => { const index = cells.findIndex(c => c.id === id); return index < 0 ? 'Missing cell' : `Cell ${index + 1}` }
@@ -165,8 +175,11 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
     const linkedNotebook = (operation?.body as { notebook_id?: string } | undefined)?.notebook_id
     const linkedProject = (operation?.body as { project_id?: string } | undefined)?.project_id
     const messageRetry = operation?.method === 'POST' && operation.path === `/conversations/${conversation?.id}/messages`
-    if (messageRetry ? (!notebookId || (linkedNotebook && linkedNotebook !== notebookId)) : (!project || !member || (linkedNotebook && linkedNotebook !== notebookId) || (linkedProject && linkedProject !== project.id))) throw new Error('Return to the original notebook and context before retrying this operation.')
+    const agentRetry = operation?.method === 'POST' && operation.path === '/agents/runs'
+    const agentBody = operation?.body as {scope?:{kind:string;resource_id:string};content?:string} | undefined
+    if (agentRetry ? (!conversation || agentBody?.scope?.kind!=='notebook' || agentBody.scope.resource_id!==notebookId) : messageRetry ? (!notebookId || (linkedNotebook && linkedNotebook !== notebookId)) : (!project || !member || (linkedNotebook && linkedNotebook !== notebookId) || (linkedProject && linkedProject !== project.id))) throw new Error('Return to the original notebook and context before retrying this operation.')
     await retryMutation()
+    if (agentRetry && notebookId && conversation && agentBody?.content) { clearSentDraft(notebookId,conversation.id,agentBody.content); agentFeed.reload() }
     if (operation?.method === 'POST' && operation.path.startsWith('/conversations/') && operation.path.endsWith('/messages') && typeof (operation.body as { content?: unknown }).content === 'string') clearSentDraft((operation.body as { notebook_id?: string }).notebook_id ?? notebookId ?? '', operation.path.split('/')[2], (operation.body as { content: string }).content)
     if (operation?.method === 'POST' && operation.path === `/notebooks/${notebookId}/comments`) {
       const body = operation.body as { notebook_id?: string; project_id?: string; cell_id?: string; parent_id?: string | null; content?: string }
@@ -174,8 +187,10 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
     }
     await refresh()
   }
-  const projection = projectConversation(notebookId ?? '', project?.id ?? '', cells.map(c => c.id), conversation ?? undefined, messages, member ? comments : [])
-  const messageView = (m: RecordData<Message>, scope?: string) => <article data-author={m.data.author_role} className={`message ${m.data.parent_id ? 'reply' : ''}`} id={`message-${m.id}`} key={m.id}><div className="message-meta"><strong>{m.data.author_role}{m.data.state === 'needs_input' ? ' · Needs input' : ''}</strong><time dateTime={new Date(m.created_at * 1000).toISOString()} title={new Date(m.created_at * 1000).toLocaleString()}>{new Date(m.created_at * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></div>{scope && <small>{scope}</small>}{m.data.cell_id && <small>{cellLabel(m.data.cell_id)} reference{!cells.some(c => c.id === m.data.cell_id) ? ' · historical missing cell' : ''}</small>}{m.data.parent_id && <a href={`#message-${m.data.parent_id}`}>In reply to message</a>}<p>{m.data.content}</p><button onClick={() => setReply(m.id)}>Reply to message</button></article>
+  const feedMessages = agentFeed.conversation === conversation?.id ? agentFeed.messages : []
+  const displayedMessages = [...messages, ...feedMessages.filter(item=>!messages.some(message=>message.id===item.id))].sort((a,b)=>(a.sequence??a.created_at)-(b.sequence??b.created_at))
+  const projection = projectConversation(notebookId ?? '', project?.id ?? '', cells.map(c => c.id), conversation ?? undefined, displayedMessages, member ? comments : [])
+  const messageView = (m: RecordData<Message>, scope?: string) => <article data-author={m.data.author_role} className={`message ${m.data.parent_id ? 'reply' : ''}`} id={`message-${m.id}`} key={m.id}><div className="message-meta"><strong>{m.data.author_role}{m.data.state === 'needs_input' ? ' · Needs input' : ''}</strong><time dateTime={new Date(m.created_at * 1000).toISOString()} title={new Date(m.created_at * 1000).toLocaleString()}>{new Date(m.created_at * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></div>{scope && <small>{scope}</small>}{m.data.cell_id && <small>{cellLabel(m.data.cell_id)} reference{!cells.some(c => c.id === m.data.cell_id) ? ' · historical missing cell' : ''}</small>}{m.data.parent_id && <a href={`#message-${m.data.parent_id}`}>In reply to message</a>}<p>{m.data.content}</p><button onClick={() => setReply(m.id)}>Reply to message</button>{agentRuns.filter(run=>run.messages.some(link=>link.purpose==='user'&&link.message_id===m.id)).map(run=><AgentActivity key={run.id} run={run} onChange={agentFeed.reload}/>)}</article>
   const commentMeta = (record: RecordData<Comment>) => <div className="message-meta"><strong>{record.data.author_role}</strong><time dateTime={new Date(record.created_at * 1000).toISOString()} title={new Date(record.created_at * 1000).toLocaleString()}>{new Date(record.created_at * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></div>
   const commentView = (root: RecordData<Comment>) => <article className="message cell-comment" tabIndex={-1} data-comment-cell={root.data.cell_id} key={root.id}>
     <div className="comment-anchor"><button disabled={root.data.anchor_status === 'orphaned' || !cells.some(c => c.id === root.data.cell_id)} onClick={() => void jump(notebookId, root.data.cell_id)}>{cellLabel(root.data.cell_id)} · <span className={`badge ${root.data.anchor_status}`}>{root.data.anchor_status === 'orphaned' ? 'Missing cell' : root.data.anchor_status}</span></button>{commentMeta(root)}</div><p>{root.data.content}</p>
@@ -194,13 +209,23 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
       {projection.general.map(m => messageView(m))}
       {projection.orphanMessages.map(m => messageView(m, 'Missing cell reference · historical message'))}
       {projection.orphanPlacement.map(m => messageView(m, 'Missing placement cell · historical message'))}
+      {agentRuns.filter(run=>!run.messages.some(link=>link.purpose==='user'&&displayedMessages.some(message=>message.id===link.message_id))).map(run=><AgentActivity key={run.id} run={run} onChange={agentFeed.reload}/>)}
+      {agentFeed.error&&<p role="alert" className="alert">{agentFeed.error} <button onClick={agentFeed.reload}>Refresh agent activity</button></p>}
       {projection.orphanComments.length > 0 && <section aria-label="Comments on missing cells"><h3>Comments on missing cells</h3>{projection.orphanComments.map(commentView)}</section>}
       {legacy.length > 0 && <section className="legacy-history" aria-label="Historical notebook conversations"><h3>Historical notebook conversations · read-only</h3>{legacy.map(({ conversation: thread, messages: history }) => <div key={thread.id}><h4>{thread.data.title} · {thread.id}</h4>{history.filter(m => (!m.notebook_id || m.notebook_id === notebookId) && (!m.data.notebook_id || m.data.notebook_id === notebookId)).map(m => <article className="message" data-author={m.data.author_role} key={m.id}><strong>{m.data.author_role}</strong><small> · {m.id}</small>{m.data.cell_id && <small> · {cellLabel(m.data.cell_id)}{!cells.some(c => c.id === m.data.cell_id) ? ' · Missing cell reference' : ''}</small>}<p>{m.data.content}</p></article>)}</div>)}</section>}
 
       {error && <p role="alert" className="alert">{error}</p>}{pending && <div className="alert"><p>An operation has an unknown outcome. Retry the identical operation safely; no new operation ID will be created.</p><button disabled={busy || retryWaiting} onClick={() => void run(retryPending, pendingMutation()?.path !== `/conversations/${conversation?.id}/messages`)}>Retry pending operation</button></div>}
     </section>,
     composer: notebookId ? <div className="composer-shell" ref={composerShell}>{!conversation && <div className="composer-status" role={canonicalError ? 'alert' : 'status'}>{canonicalError ? <>Conversation unavailable. <button onClick={retryCanonical}>Retry conversation</button></> : 'Loading conversation…'}</div>}
-      {conversation && <ConversationComposer key={`${notebookId}.${conversation.id}`} notebookId={notebookId} conversationId={conversation.id} cells={cells.map(c => ({ id: c.id, source: c.source ?? '' }))} drafts={draftCells} conflict={conflict} revision={revision} selectedCell={selectedCell} reference={reference?.notebook === notebookId && reference.conversation === conversation.id ? reference : null} reply={reply} onReplyConsumed={() => setReply(null)} onReferenceRemoved={() => setReference(null)} busy={busy || !messagesLoaded || !!canonicalError} pending={pending} onSend={async (body, content) => { let sent = false; await run(async () => { await change(`/conversations/${conversation.id}/messages`, 'POST', body); sent = true; clearSentDraft(notebookId, conversation.id, content); setMessages(await all<Message>(`/conversations/${conversation.id}/messages`)) }, false); return sent }} />}</div> : null,
+      {conversation && <ConversationComposer key={`${notebookId}.${conversation.id}`} notebookId={notebookId} conversationId={conversation.id} cells={cells.map(c => ({ id: c.id, source: c.source ?? '' }))} drafts={draftCells} conflict={conflict} revision={revision} selectedCell={selectedCell} reference={reference?.notebook === notebookId && reference.conversation === conversation.id ? reference : null} reply={reply} onReplyConsumed={() => setReply(null)} onReferenceRemoved={() => setReference(null)} busy={busy || !messagesLoaded || !!canonicalError} pending={pending} onAsk={agentFeed.config?.enabled ? async ({content,parent_id,cell_id,document_revision}) => {
+        let sent = false
+        await run(async () => {
+          await change('/agents/runs','POST',{scope:{kind:'notebook',resource_id:notebookId},mode:'coordinate',content,parent_id,cell_id,document_revision})
+          sent = true
+          agentFeed.reload()
+        },false)
+        return sent
+      } : undefined} onSend={async (body, content) => { let sent = false; await run(async () => { await change(`/conversations/${conversation.id}/messages`, 'POST', body); sent = true; clearSentDraft(notebookId, conversation.id, content); setMessages(await all<Message>(`/conversations/${conversation.id}/messages`)) }, false); return sent }} />}</div> : null,
 
   }
   return <div className="workspace">{renderNotebook?.(canvas)}{contextNotice && <HeaderSlot><small className="context-note">{contextNotice}</small></HeaderSlot>}<SidePanel side="left"><h2>Roadmap</h2>

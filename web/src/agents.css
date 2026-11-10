@@ -22,3 +22,7 @@
 .agent-proposal dd { margin:0 0 5px; }
 .agent-events { max-height:220px; overflow:auto; padding-left:22px; margin:8px 0 0; color:var(--muted); font-size:12px; }
 .agent-payload { max-height:240px; overflow:auto; font-size:12px; white-space:pre-wrap; }
+.agent-plan ol { padding-inline-start:22px; }
+.agent-plan ol > li + li { margin-top:6px; }
+.agent-plan ul { padding-inline-start:18px; }
+.agent-plan small,.agent-plan a { display:block; }
