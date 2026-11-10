@@ -123,6 +123,11 @@ class PolicyEngine:
                 if root is None or path[:len(_segments(root))] != _segments(root):
                     raise AgentFault('Directory is outside this run grant', 403)
                 target['path'] = args.path
+                if tool.target_type == 'workspace_resources':
+                    if run['scope']['kind'] != 'workspace' or len(path) != len(_segments(root))+1:
+                        raise AgentFault('Create only in the granted directory',403)
+                    target['notebook_path'] = args.path + '/' + args.notebook_name
+                    if args.project_id: target['project_id'] = args.project_id
             if isinstance(args, RoadmapTarget):
                 roadmap = self.store.app._row(args.roadmap_id, 'roadmap')
                 if not grant['project_id'] or roadmap['project_id'] != grant['project_id'] or (roadmap['notebook_id'] and roadmap['notebook_id'] not in grant['notebooks']):

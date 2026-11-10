@@ -107,8 +107,30 @@ class FakeProvider:
     config = ProviderConfig('fake', 'fake-v1')
 
     async def complete(self, messages, tools, output_limit):
-        tool_messages = [m for m in messages if m['role'] == 'tool']
-        if tools and not tool_messages:
+        calls = [m for m in messages if m['role'] == 'tool']
+        names = {t['function']['name'] for t in tools}
+        prompt = next(m['content'] for m in reversed(messages) if m['role']=='user')
+        if calls and any('create_workspace_notebook' in str(m.get('tool_calls','')) for m in messages):
+            outcome = json.loads(calls[-1]['content'])
+            if outcome.get('state')=='completed':
+                return ModelReply(content='The approved project and notebook are saved. Open the notebook to continue with the analysis.')
+            return ModelReply(content='The notebook was not created. Review the recorded outcome and choose a different name or verified project.')
+        if 'create_workspace_notebook' in names and not calls:
+            topic = prompt.lower()
+            if 'revenue' in topic or 'forecast' in topic:
+                project, filename = 'Revenue Forecasting', 'exploratory-analysis.ipynb'
+                explanation = 'Start by checking dates, missing values, and seasonality. Then compare a simple baseline with a forecast for the next quarter.'
+            elif 'markov' in topic and ('simple' in topic or 'notebook' in topic):
+                project, filename = 'Markov Chains', 'markov-chain.ipynb'
+                explanation = 'A two-state notebook can make transitions tangible. Start with a transition matrix, then simulate and compare long-run behavior.'
+            else: project = None
+            if project:
+                snapshot = next((m['content'] for m in messages if m['content'] and isinstance(m['content'],str) and m['content'].startswith('Bounded resource data: ')), '')
+                scope = json.loads(snapshot.removeprefix('Bounded resource data: ')).get('scope',{}) if snapshot else {}
+                parent = scope.get('directory','')
+                return ModelReply(content=explanation, calls=[ToolCall(id='workspace_create',name='create_workspace_notebook',
+                    arguments={'path':'/'.join(filter(None,[parent,project])),'notebook_name':filename,'objective':prompt[:1200]})])
+        if 'list_projects' in names and not calls:
             return ModelReply(calls=[ToolCall(id='catalog_read', name='list_projects', arguments={})])
         return ModelReply(content='Start with probability, conditional probability, and matrix multiplication. Then learn states, transition probabilities, simulation, and stationary distributions. A simple two-state Markov chain is a useful first notebook example.')
 

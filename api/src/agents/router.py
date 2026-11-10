@@ -56,3 +56,13 @@ async def cancel(request: Request, run: Identity, body: Control):
 @router.post('/runs/{run}/resume')
 async def resume(request: Request, run: Identity, body: Control):
     return await service(request).control(run, body, 'resume')
+
+
+@router.get('/conversations/{conversation}/messages')
+async def recent_messages(request: Request, conversation: Identity, before: int = Query(0,ge=0,le=2**63-1), limit: int = Query(30,ge=1,le=50)):
+    return await asyncio.to_thread(service(request).store.messages,conversation,before,limit)
+
+
+@router.get('/conversations/{conversation}/handoffs')
+async def handoffs(request: Request, conversation: Identity, limit: int = Query(20,ge=1,le=50)):
+    return await asyncio.to_thread(service(request).store.handoffs,conversation,limit)

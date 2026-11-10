@@ -37,6 +37,7 @@ class Budgets(Model):
 class RunCreate(Model):
     operation_id: Operation
     scope: Scope = Field(default_factory=Scope)
+    mode: Literal['discuss', 'coordinate'] = 'discuss'
     content: str = Field(min_length=1, max_length=8000)
     authorized_notebooks: list[Identity] = Field(default_factory=list, max_length=20)
     budgets: Budgets = Field(default_factory=Budgets)

@@ -223,7 +223,7 @@ class WorkspaceNotebookStore(NotebookStore):
                     raise NotebookError('Project identity changed', 409)
             return document, {key: row.get(key) for key in ('path', 'project_id', 'project_path')}
 
-    def associate(self, path, operation_id, create=False):
+    def associate(self, path, operation_id, create=False, *, expected_project_id=None):
         with self.locked():
             mappings = self._manifest()
             root = os.fstat(self.browser._root_fd)
@@ -233,6 +233,8 @@ class WorkspaceNotebookStore(NotebookStore):
                     raise NotebookError('Operation ID reused with different input', 409)
             for notebook, row in mappings.items():
                 if row['path'] == path and row['root'] == scope:
+                    if expected_project_id and row.get('project_id') != expected_project_id:
+                        raise NotebookError('Approved project binding changed', 409)
                     if create and row['operation_id'] != operation_id:
                         raise NotebookError('Notebook already exists', 409)
                     if row['confirmed'] or row.get('pending'):
@@ -247,6 +249,13 @@ class WorkspaceNotebookStore(NotebookStore):
                 notebook, row = uuid.uuid4().hex, None
             fd, name = self._parent(path)
             try:
+                if expected_project_id:
+                    parent_path = path.rpartition('/')[0]
+                    project = self.browser.project(parent_path)
+                    binding = self.browser.project_store.project_binding(tuple(scope), parent_path)
+                    info = os.fstat(fd)
+                    if project['id'] != expected_project_id or not binding or (info.st_dev,info.st_ino) != (binding['dir_device'],binding['dir_inode']):
+                        raise NotebookError('Approved project binding changed', 409)
                 raw = self._bytes(fd, name)
                 if row is None and create and raw is not None:
                     raise NotebookError('Workspace entry already exists', 409)
@@ -283,6 +292,8 @@ class WorkspaceNotebookStore(NotebookStore):
                             raise
                         row.update(project_id=project['id'], project_path=project['path'])
                         break
+                    if expected_project_id and row.get('project_id') != expected_project_id:
+                        raise NotebookError('Approved project binding changed', 409)
                     mappings[notebook] = row
                     self._journal(mappings)
                 self._write(notebook + '.ipynb', document)

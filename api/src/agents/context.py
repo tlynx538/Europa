@@ -53,8 +53,11 @@ class ContextManager:
                     {'id': call['call_id'], 'type': 'function', 'function': {'name': call['tool'], 'arguments': call['arguments']}}]}
                 outcome = {'state': call['state'], 'result': json.loads(call['result']) if call['result'] else None, 'error': call['error']}
                 transcript.append([assistant, {'role': 'tool', 'tool_call_id': call['call_id'], 'content': encoded(bounded(outcome, 1500))}])
-                if call['classification'] != 'read' and call['state'] == 'completed':
-                    effects.append({'tool': call['tool'], 'target': json.loads(call['target']), 'result': outcome['result']})
+                if call['classification'] != 'read' and outcome['result'] is not None:
+                    effects.append({'tool': call['tool'], 'state': call['state'], 'target': json.loads(call['target']), 'result': outcome['result']})
+            handoff = app.db.execute('SELECT id,project_id,notebook_id,plan FROM agent_handoffs WHERE destination_conversation_id=? ORDER BY created_at DESC LIMIT 1',(run['conversation_id'],)).fetchone()
+            if handoff:
+                data['handoff'] = {**dict(handoff),'plan':json.loads(handoff['plan'])}
             data['confirmed_effects'] = effects
             return history, data, transcript
 

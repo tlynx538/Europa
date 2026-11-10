@@ -1,5 +1,5 @@
 """Version 7 extension of the existing application database, not a chat database."""
-TABLES = ('agent_conversations', 'agent_runs', 'agent_events', 'agent_messages', 'agent_turns', 'agent_calls', 'agent_approvals')
+TABLES = ('agent_conversations', 'agent_runs', 'agent_events', 'agent_messages', 'agent_turns', 'agent_calls', 'agent_approvals', 'agent_handoffs')
 
 SCHEMA = [
     '''CREATE TABLE agent_conversations (
@@ -53,4 +53,16 @@ SCHEMA = [
         expires_at REAL NOT NULL, decision TEXT NOT NULL CHECK(decision IN ('pending','granted','denied','expired','cancelled')),
         decided_at REAL, actor TEXT)''',
     "CREATE INDEX agent_approval_expiry ON agent_approvals(expires_at) WHERE decision='pending'",
+]
+
+HANDOFF_SCHEMA = [
+    """CREATE TABLE agent_handoffs (
+        id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(id),
+        operation_id TEXT NOT NULL UNIQUE REFERENCES agent_calls(operation_id),
+        source_conversation_id TEXT NOT NULL REFERENCES records(id),
+        destination_conversation_id TEXT NOT NULL REFERENCES records(id),
+        project_id TEXT NOT NULL REFERENCES records(id), notebook_id TEXT NOT NULL REFERENCES catalog(id),
+        path TEXT NOT NULL, plan TEXT NOT NULL CHECK(json_valid(plan)), created_at REAL NOT NULL)""",
+    'CREATE INDEX agent_handoff_source ON agent_handoffs(source_conversation_id,created_at)',
+    'CREATE INDEX agent_handoff_destination ON agent_handoffs(destination_conversation_id,created_at)',
 ]

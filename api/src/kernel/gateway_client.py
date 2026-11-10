@@ -281,7 +281,19 @@ class GatewayClient:
                     self._websocket_url(kernel_id, session_id),
                     max_msg_size=self.max_output_bytes,
                 ) as websocket:
-                    return await self._handshake(websocket, session_id)
+                    while True:
+                        info = await self._handshake(websocket, session_id)
+                        model = await self.inspect_kernel(kernel_id)
+                        if not isinstance(model, dict) or model.get('id') != kernel_id:
+                            raise GatewayError('Kernel identity changed during readiness', 503)
+                        if model.get('execution_state') == 'idle':
+                            return info
+                        if model.get('execution_state') != 'starting':
+                            raise GatewayError('Kernel state is unavailable during readiness', 503)
+                        # The shell can respond before Gateway's IOPub activity
+                        # subscriber sees startup status. Request kernel info again
+                        # so Gateway can observe the live kernel, without running code.
+                        await asyncio.sleep(.1)
         except TimeoutError as exc:
             raise GatewayError("Kernel readiness timed out", 504) from exc
         except aiohttp.ClientError as exc:

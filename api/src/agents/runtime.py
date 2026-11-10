@@ -4,16 +4,13 @@ import inspect
 import time
 
 from agents.context import ContextManager, bounded
+from agents.home import HomeTools, PartialEffect, UncertainEffect
 from agents.models import ModelReply
 from agents.providers import DisabledProvider, ProviderFailure, Redactor, configured_provider
 from agents.store import AgentFault, AgentStore, FenceLost, digest, identity
 from agents.tools import PolicyEngine, ReadTools, ToolRegistry
 from notebooks.store import NotebookError
 from workspace.browser import WorkspaceError
-
-
-class UncertainEffect(Exception):
-    """Side effect might have been accepted; never retry blindly."""
 
 
 class AgentRuntime:
@@ -29,7 +26,7 @@ class AgentRuntime:
         self.store = AgentStore(state.application_store, state.workspace, self.redactor)
         self.context = ContextManager(self.store)
         self.policy = PolicyEngine(self.store)
-        self.registry = ToolRegistry(ReadTools(self.store).declarations())
+        self.registry = ToolRegistry([*ReadTools(self.store).declarations(), HomeTools(self.store,state).declaration()])
         self.owner, self.wake = identity(), asyncio.Event()
         self.worker, self.closing = None, False
         self.inflight = set()
@@ -166,9 +163,11 @@ class AgentRuntime:
             safe = bounded(self.redactor.value(validated), 12000)
             await asyncio.to_thread(self.store.end_call, *key, call['id'], 'completed', result=safe)
         except FenceLost: raise
+        except PartialEffect as exc:
+            await asyncio.to_thread(self.store.end_call, *key, call['id'], 'failed', result=self.redactor.value(exc.result), error=str(exc))
         except (TimeoutError, UncertainEffect):
             await asyncio.to_thread(self.store.end_call, *key, call['id'], 'failed' if tool.classification=='read' else 'uncertain', error='Tool outcome could not be verified')
-        except (NotebookError, WorkspaceError) as exc:
+        except (AgentFault, NotebookError, WorkspaceError) as exc:
             definitive = exc.status_code < 500
             await asyncio.to_thread(self.store.end_call, *key, call['id'], 'failed' if definitive or tool.classification=='read' else 'uncertain',
                                     error='Tool target unavailable, invalid, or changed')

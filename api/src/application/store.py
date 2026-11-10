@@ -17,7 +17,7 @@ import uuid
 
 from notebooks.store import NotebookError, NotebookStore, source, source_hash
 from application.models import Task
-from agents.schema import SCHEMA as AGENT_SCHEMA, TABLES as AGENT_TABLES
+from agents.schema import SCHEMA as AGENT_SCHEMA, TABLES as AGENT_TABLES, HANDOFF_SCHEMA
 
 
 class ApplicationError(NotebookError):
@@ -121,7 +121,7 @@ class ApplicationStore:
             self.db.execute('PRAGMA journal_mode=WAL')
             self.db.execute('PRAGMA synchronous=FULL')
             version = self.db.execute('PRAGMA user_version').fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5, 6, 7): raise ApplicationError('Unsupported application schema version', 503)
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8): raise ApplicationError('Unsupported application schema version', 503)
             # A v1 table rebuild must disable FK enforcement outside BEGIN; all
             # original rows and dependent tables are checked before commit.
             if 0 < version < 7: self.db.execute('PRAGMA foreign_keys=OFF')
@@ -149,6 +149,9 @@ class ApplicationStore:
                         if version > 1: self._migrate_v7_records()
                         for statement in AGENT_SCHEMA: self.db.execute(statement)
                         self.db.execute('PRAGMA user_version=7')
+                    if version < 8:
+                        for statement in HANDOFF_SCHEMA: self.db.execute(statement)
+                        self.db.execute('PRAGMA user_version=8')
                     if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='workspace_operations'").fetchone() is None:
                         raise ApplicationError('Missing workspace journal', 503)
                     for name in ('project_intents', 'project_bindings', *AGENT_TABLES):

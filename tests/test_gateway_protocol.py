@@ -184,3 +184,24 @@ async def test_dead_initial_kernel_is_never_reported_ready():
     with pytest.raises(GatewayError): await client.create_kernel()
     assert consumed == [True] and deleted == [('DELETE','/api/kernels/initial')]
     assert not client._owned and client._initial_kernel is None
+
+
+async def test_startup_waits_for_gateway_activity_to_confirm_idle():
+    client, websocket, calls = fake_client([])
+    states = iter(['starting', 'idle'])
+    sent = []
+    send = websocket.send_json
+
+    async def request(method, path, **kwargs):
+        calls.append((method, path))
+        return {'id': 'kernel', 'execution_state': next(states)}
+
+    async def send_json(message):
+        sent.append(message['header']['msg_type'])
+        await send(message)
+
+    client._request = request
+    websocket.send_json = send_json
+    assert await client.wait_ready('kernel') == {'status': 'ok'}
+    assert calls == [('GET', '/api/kernels/kernel')] * 2
+    assert sent == ['kernel_info_request'] * 2

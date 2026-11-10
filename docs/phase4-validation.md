@@ -87,3 +87,90 @@ provider streaming and general exactly-once effects are not claimed. Full logs:
 `/private/tmp/europa-phase4-validation/` (initial application/agent fixture logs
 also under `/tmp/europa-phase4-*.log`). Test listeners were stopped; owner data and
 preview were untouched. Mandatory 4A gates pass; proceed to 4B.
+
+## Checkpoint 4B
+
+Starting commit `1534cc0` (validated 4A).
+
+The Home drawer uses the canonical workspace conversation and bounded polling.
+Closing it or reloading the page leaves queued work and approvals on the server.
+The request operation ID stays in the browser until the send is acknowledged so
+a lost response can be retried with the same arguments. The Files and Running
+views retain their existing routes and behavior.
+
+New API reads are `/api/agents/conversations/{id}/messages` (cursor-paginated)
+and `/api/agents/conversations/{id}/handoffs` (bounded). Agent run creation now
+accepts `mode=coordinate` for the Home workspace capability. Schema v8 adds
+the handoff record with the source and destination conversation IDs, exact
+approved plan and digest, project and notebook IDs, and creation provenance.
+The handoff is linked to the destination's canonical conversation. Planning
+messages stay in the workspace conversation.
+
+The coordinator's only mutation requires an exact owner approval for a direct
+child project in the granted directory and one named notebook. A verified
+existing project can be targeted by its registered ID. Project creation and
+notebook association reuse the existing workspace journals. Physical binding is
+verified before writing, and a previously archived catalog record prevents
+creation. The integration test exposed that a newly registered directory has a
+physical binding before it has an application catalog row. The shared notebook
+association now creates the catalog record through the existing bind operation.
+
+Changed files include `api/src/agents/` (Home tool, grants, context, runtime,
+schema, router and fake provider), `api/src/application/store.py` (migration),
+`api/src/workspace/{notebooks,router,service}.py` (shared association),
+`web/src/{PhysicalWorkspace,HomeCoordinator,AgentActivity}.tsx`, the agent API,
+feed and styles, and the Python and Chrome integration tests.
+
+The backend tests verify exact approval and denial, duplicate decisions,
+collision protection, canonical physical identity and handoff, and a lost tool
+acknowledgement after actual notebook creation. The last case records uncertainty
+and preserves the notebook mapping. A project may exist even when its notebook
+could not be created. The tool records partial success where it can verify the
+result. Recovery of an uncertain multi-resource effect requires inspection.
+
+The Chrome journey sends the forecast objective, reloads while awaiting approval,
+approves creation, and opens the saved notebook. After a real backend restart it
+checks the Files and Running tabs and reopens the same notebook and conversation
+from the persisted Home history. Inspected captures show the
+[desktop approval drawer](screenshots/phase4/4b/home-approval-desktop.png) and
+[mobile conversation after restart](screenshots/phase4/4b/home-handoff-mobile.png).
+
+| Command | Exit | Result |
+| --- | --- | --- |
+| `.venv/bin/python -m pytest tests/test_agents_home.py tests/test_agents_foundation.py tests/test_application.py tests/test_workspace_notebooks.py -q` | 0 | 100 passed |
+| `.venv/bin/python -m pytest --run-local-gateway -q -ra` | 0 | 361 passed, 79 Linux/containerd skips |
+| `npm test -- --maxWorkers=1` (Node 24, `web/`) | 0 | 94 passed across 17 files |
+| `npm run build` (`web/`) | 0 | production build passed |
+| `npm run test:browser -- --project=agents --grep '4B:' --workers=1 --retries=0` | 0 | 1 passed |
+| `npx playwright test --workers=1 --retries=0 --reporter=line,json` (first full run) | 1 | 55 passed, 3 failed, 1 ARM64 skip |
+
+The first full run exposed three existing Running regressions in the mixed
+recents, physical project and multiple-kernel journeys. All three failed on
+an Idle assertion. The captured session responses returned HTTP 200 and
+`Starting` with reason `Verified Gateway kernel reports starting`. Faster
+dashboard polling left two of three focused scenarios failing. The installed
+Jupyter Server updates this field from a separate IOPub activity subscriber.
+Gateway's shell could answer a readiness request before that subscriber saw
+status. The Gateway client now confirms the same kernel reports Idle before
+acknowledging readiness. If it still reports Starting, the client requests
+kernel info again within the existing readiness deadline. This runs no Python
+and leaves the dashboard's read-only observation contract and refresh schedule
+intact. The protocol regression verifies the correlated info requests and
+Gateway state transition.
+
+Failure logs and traces are in
+`/private/tmp/europa-phase4-validation/4b-browser.log`,
+`4b-failed-traces/`, `4b-starting-target.log`, and
+`4b-fast-observation-traces/` under the same validation directory.
+
+| Final readiness candidate | Exit | Result |
+| --- | --- | --- |
+| `npx playwright test --workers=1 --retries=0 --grep 'persisted mixed recents\|complete saved-state and verified kernel journey: project\|multiple real notebooks retain'` | 0 | 3 passed |
+| `.venv/bin/python -m pytest --run-local-gateway -q -ra` | 0 | 362 passed, 79 Linux/containerd skips |
+| `npx playwright test --workers=1 --retries=0 --reporter=line,json` | 0 | 58 passed, 1 ARM64 skip, 3.1 min |
+
+Final logs are `4b-ready-target.log`, `4b-python-final.log`,
+`4b-browser-final.log` and `4b-browser-final.json` in the validation directory.
+The final runtime change affects only authenticated kernel readiness in
+`api/src/kernel/gateway_client.py` and its protocol coverage. The previously
+validated frontend production build and unit-test candidate are identical.

@@ -297,7 +297,7 @@ def test_v1_migration_preserves_legacy_records_and_integrity(tmp_path):
         assert canonical['id'] not in {'a','b'}
         assert [r['id'] for r in app.legacy_notebook_conversations(nid)['items']] == ['a','b']
         with app.transaction():
-            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 7
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 8
             assert not app.db.execute('PRAGMA foreign_key_check').fetchall()
             assert app.db.execute('SELECT response FROM operations WHERE id=?', ('old-op',)).fetchone()[0] == '{"id": "m"}'
             assert app.db.execute('SELECT data FROM versions WHERE roadmap_id=?', ('r',)).fetchone()[0] == '{"objective": "Old plan", "tasks": []}'
@@ -343,7 +343,7 @@ def test_v2_upgrade_preserves_records_operations_and_snapshots_only_canonical(tm
     app = ApplicationStore(tmp_path / 'app', nb)
     try:
         with app.transaction():
-            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 7
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 8
             assert not app.db.execute('PRAGMA foreign_key_check').fetchall()
             assert app.db.execute('SELECT * FROM records WHERE id=?', (old['id'],)).fetchone() == raw
         assert app.listing('message', parent=c['id'])['items'][0]['data']['placement_after_cell_id'] == anchor
@@ -378,7 +378,7 @@ def test_v3_upgrade_preserves_existing_rows_and_notebook_bytes(tmp_path):
     app = ApplicationStore(tmp_path / 'app', nb)
     try:
         with app.transaction():
-            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 7
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 8
             assert not app.db.execute('PRAGMA foreign_key_check').fetchall()
             assert [tuple(row) for row in app.db.execute('SELECT * FROM records ORDER BY sequence')] == records
             assert [tuple(row) for row in app.db.execute('SELECT * FROM operations ORDER BY id')] == operations
@@ -407,7 +407,7 @@ def test_v4_upgrade_keeps_application_records_and_private_notebooks(tmp_path):
     app = ApplicationStore(tmp_path / 'app', nb)
     try:
         with app.transaction():
-            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 7
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 8
             assert tuple(app.db.execute('SELECT * FROM records WHERE id=?', (p['id'],)).fetchone()) == previous
             assert app.db.execute("SELECT 1 FROM sqlite_master WHERE name='workspace_operations'").fetchone()
         assert (tmp_path / 'app' / 'application.sqlite3').stat().st_mode & 0o777 == before == 0o600
@@ -431,7 +431,7 @@ def test_v5_upgrade_adds_project_bindings_without_touching_legacy_records(tmp_pa
     try:
         assert app.get(old['id'], 'project') == old
         with app.transaction():
-            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 7
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 8
             assert app.db.execute('SELECT count(*) FROM project_bindings').fetchone()[0] == 0
     finally:
         app.close(); nb.close()

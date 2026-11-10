@@ -1,0 +1,24 @@
+.agent-trigger { position:fixed; z-index:10; inset:auto max(16px,calc((100vw - 1170px) / 2)) 16px auto; box-shadow:0 2px 10px #0001; }
+.agent-drawer { box-sizing:border-box; width:min(464px,100%); height:100dvh; max-width:100%; max-height:100dvh; padding:0; margin:0 0 0 auto; inset:0; border:1px solid var(--line); color:var(--ink); background:var(--surface); }
+.agent-drawer::backdrop { background:#131c2633; }
+.agent-drawer-layout { height:100%; display:flex; flex-direction:column; min-height:0; }
+.agent-drawer header { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--line); }
+.agent-drawer h2 { margin:0; font-size:17px; }
+.agent-thread { overflow:auto; min-height:0; flex:1; padding:12px 16px; }
+.agent-drawer form { padding:8px 16px 16px; border-top:1px solid var(--line); }
+.agent-drawer textarea { display:block; resize:vertical; max-height:25dvh; margin-top:4px; }
+.agent-provider,.agent-error { margin:6px 16px; overflow-wrap:anywhere; }
+.agent-provider { color:var(--muted); font-size:12px; }
+.agent-error { color:var(--error); }
+.agent-message,.agent-activity,.agent-handoff { margin:0 0 8px; padding:9px 11px; border:1px solid var(--line); border-radius:4px; overflow-wrap:anywhere; }
+.agent-message[data-author=user] { background:var(--tint); }
+.agent-message p,.agent-events p { white-space:pre-wrap; margin:4px 0 0; }
+.agent-run-heading,.agent-buttons,.agent-handoff { display:flex; align-items:center; flex-wrap:wrap; justify-content:space-between; gap:6px; }
+.agent-activity .agent-error { margin:6px 0; }
+.agent-review { margin-top:8px; padding:8px; border:1px solid var(--line); background:var(--tint); }
+.agent-review h3 { margin:0 0 5px; font-size:14px; }
+.agent-proposal { margin:0 0 8px; }
+.agent-proposal dt { font-weight:600; }
+.agent-proposal dd { margin:0 0 5px; }
+.agent-events { max-height:220px; overflow:auto; padding-left:22px; margin:8px 0 0; color:var(--muted); font-size:12px; }
+.agent-payload { max-height:240px; overflow:auto; font-size:12px; white-space:pre-wrap; }

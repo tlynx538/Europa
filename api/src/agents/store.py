@@ -160,8 +160,10 @@ class AgentStore:
         return message['id']
 
     def create(self, body, provider):
+        # Preserve exact v7 replay identity for the original read-only contract.
+        payload = body.model_dump(exclude={'mode'} if body.mode=='discuss' else set())
         with self.app.mutex:
-            previous = self._replayed(body.operation_id, digest(['agent/create', body.model_dump()]))
+            previous = self._replayed(body.operation_id, digest(['agent/create', payload]))
             if previous is not None: return previous
         if not provider['enabled']: raise AgentFault('Agent provider is not configured', 503)
         if body.scope.kind == 'notebook': self.app.ensure_notebook_conversation(body.scope.resource_id)
@@ -171,6 +173,8 @@ class AgentStore:
                     raise AgentFault('Agent run capacity reached', 429)
                 conversation = self._conversation(body.scope)
                 grant = self._grant(body.scope, body.authorized_notebooks)
+                if body.mode == 'coordinate' and body.scope.kind == 'workspace':
+                    grant['capabilities'].append('workspace.create')
                 run, now = identity(), time.time()
                 self.db.execute('''INSERT INTO agent_runs(id,conversation_id,role,scope,grant_json,budgets,provider,model,state,created_at,updated_at,deadline)
                     VALUES (?,?,'coordinator',?,?,?, ?,?,'queued',?,?,?)''',
@@ -179,7 +183,7 @@ class AgentStore:
                 message = self._message(self._run(run), body.content, 'user')
                 self._event(run, 'run_queued', message_id=message, provider=provider['provider'], model=provider['model'])
                 return {'id': run, 'conversation_id': conversation['id'], 'message_id': message}
-            return self._operation(body.operation_id, 'agent/create', body.model_dump(), work)
+            return self._operation(body.operation_id, 'agent/create', payload, work)
 
     def _approval_view(self, row):
         return {'id': row['id'], 'run_id': row['run_id'], 'call_id': row['call_id'], 'digest': row['digest'],
@@ -209,7 +213,11 @@ class AgentStore:
             self.app._row(conversation, 'conversation')
             rows = self.db.execute('SELECT id,rowid FROM agent_runs WHERE conversation_id=? AND rowid<? ORDER BY rowid DESC LIMIT ?',
                                    (conversation, before or 2**63-1, limit + 1)).fetchall()
-            return {'items': [self._public(self._run(r['id'])) for r in rows[:limit]],
+            identities = [r['id'] for r in rows[:limit]]
+            if not before:
+                active = self.db.execute("SELECT id FROM agent_runs WHERE conversation_id=? AND state IN ('queued','running','waiting_for_approval','cancelling') ORDER BY rowid DESC LIMIT ?", (conversation,MAX_ACTIVE)).fetchall()
+                identities.extend(r['id'] for r in active if r['id'] not in identities)
+            return {'items': [self._public(self._run(run)) for run in identities],
                     'next_before': rows[limit-1]['rowid'] if len(rows) > limit else None}
 
     def events(self, run, after, limit):
@@ -281,7 +289,8 @@ class AgentStore:
                 self._transition(row, 'failed', error='Model response exceeded run budget')
                 return False
             self.db.execute("UPDATE agent_turns SET state='completed',response=? WHERE run_id=? AND number=? AND state='started'", (encoded(payload), run, number))
-            self._event(run, 'model_responded', request=number, proposed_tools=len(reply.calls))
+            self._event(run, 'model_responded', request=number, proposed_tools=len(reply.calls),
+                        **({'message': payload['content']} if reply.calls and payload['content'] else {}))
             return True
 
     def _call(self, identity):
@@ -420,3 +429,34 @@ class AgentStore:
             self.app._project(project)
             if row['scope']['kind'] == 'notebook': self.app._scope(project, row['scope']['resource_id'])
         if row['scope']['kind'] == 'notebook': return self.app._notebook_scope(row['scope']['resource_id'])
+
+
+    def record_handoff(self, run, operation, created, objective):
+        with self.transaction():
+            row = self._fence(run['id'],run['owner'],run['generation'],cancelling=True)
+            call = self.db.execute("SELECT * FROM agent_calls WHERE run_id=? AND operation_id=? AND state='started'",(row['id'],operation)).fetchone()
+            if not call or call['tool']!='create_workspace_notebook': raise AgentFault('Handoff effect is not owned',409)
+            review = self.db.execute("SELECT id,digest FROM agent_approvals WHERE call_id=? AND decision='granted'",(call['id'],)).fetchone()
+            if not review: raise AgentFault('Handoff has no approved creation',409)
+            notebook,project=created['notebook_id'],created['project_id']
+            self.app._scope(project,notebook)
+            destination=self._conversation(Scope(kind='notebook',resource_id=notebook))['id']
+            handoff,now=identity(),time.time()
+            plan={'objective':objective,'approved_creation':json.loads(call['arguments']),'approval_id':review['id'],'digest':review['digest']}
+            self.db.execute('INSERT INTO agent_handoffs VALUES (?,?,?,?,?,?,?,?,?,?)',
+                            (handoff,row['id'],operation,row['conversation_id'],destination,project,notebook,created['path'],encoded(plan),now))
+            self._event(row['id'],'handoff_saved',handoff_id=handoff,notebook_id=notebook,project_id=project,path=created['path'])
+            return {'id':handoff,'destination_conversation_id':destination}
+
+    def handoffs(self, conversation, limit):
+        with self.app.mutex:
+            self.app._row(conversation,'conversation')
+            rows=self.db.execute('SELECT * FROM agent_handoffs WHERE source_conversation_id=? OR destination_conversation_id=? ORDER BY created_at DESC LIMIT ?', (conversation,conversation,limit)).fetchall()
+            return {'items':[self.redactor.value({k:json.loads(r[k]) if k=='plan' else r[k] for k in r.keys() if k!='operation_id'}) for r in rows]}
+
+    def messages(self, conversation, before, limit):
+        with self.app.mutex:
+            self.app._row(conversation,'conversation')
+            rows=self.db.execute("SELECT * FROM records WHERE kind='message' AND parent_id=? AND sequence<? ORDER BY sequence DESC LIMIT ?", (conversation,before or 2**63-1,limit+1)).fetchall()
+            return {'items': [self.redactor.value(self.app._view(r)) for r in reversed(rows[:limit])],
+                    'next_before': rows[limit-1]['sequence'] if len(rows)>limit else None}

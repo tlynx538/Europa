@@ -5,6 +5,7 @@ from starlette.concurrency import run_in_threadpool
 
 from workspace.browser import WorkspaceBrowser
 from workspace.mutation import WorkspaceMutation
+from workspace.service import associate_notebook as associate_verified
 
 router = APIRouter()
 
@@ -21,16 +22,7 @@ class SaveBody(CreateBody):
 
 
 def open_notebook(request, body, create):
-    store = request.app.state.notebook_store
-    notebook = store.associate(body.path, body.operation_id, create=create)
-    location = store.location(notebook)
-    if location.get('project_id'):
-        project = request.app.state.workspace.project(location['project_path'])
-        if project['id'] != location['project_id']:
-            from workspace.browser import WorkspaceError
-            raise WorkspaceError(409, 'Project binding changed')
-    request.app.state.application_store.bind_physical_notebook(notebook, location)
-    return {'notebook_id': notebook, **location}
+    return associate_verified(request.app.state, body.path, body.operation_id, create=create)
 
 
 @router.post('/workspace/notebooks/open')

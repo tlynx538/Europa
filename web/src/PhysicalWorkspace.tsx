@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { json, request } from './api'
 import { Dashboard, type DashboardEntry } from './Dashboard'
 import { useDashboardData } from './useDashboardData'
+import { HomeCoordinator } from './HomeCoordinator'
 import type { Navigate } from './Navigation'
 
 type Entry = { name: string; type: 'directory' | 'file'; modified: number; size: number | null; project_id?: string }
@@ -62,6 +63,7 @@ export function PhysicalWorkspace({ path, tab, navigate }: { path: string; tab: 
       setItems(previous => [...previous, ...page.items]); setCursor(page.next_cursor)
     } catch (e) { setNotice(String(e)) } finally { setLoading(false) }
   }
+  const refreshCreated = useCallback(() => setRefresh(value => value + 1), [])
   return <><Dashboard path={path ? path.split('/') : []} tab={tab} onTab={value => void navigate(workspaceUrl(path, value))} onHome={() => void navigate('/')} onDirectory={parts => void navigate(workspaceUrl(parts.join('/')))} onCatalog={value => void navigate(`/${value}`)}
     entries={items.map(entry => ({ name: entry.name, kind: typeFor(entry), modified: Number.isFinite(entry.modified) ? new Date(entry.modified * 1000).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : null, size: entry.size === null ? null : entry.size < 1024 ? `${entry.size} B` : `${(entry.size / 1024).toFixed(1)} KB` }))}
     sessions={data.sessions.map(item => ({ ...item, activity: item.last_activity === null ? null : new Date(item.last_activity * 1000).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }), observedAt: item.observed_at }))} recents={data.recent.map(item => ({ ...item, openedAt: item.opened_at }))} recentError={data.recentError} onRecentMenu={data.refreshRecent}
@@ -70,6 +72,7 @@ export function PhysicalWorkspace({ path, tab, navigate }: { path: string; tab: 
     onRefresh={() => { data.refreshRecent(); if (tab === 'running') data.refreshSessions(); else setRefresh(value => value + 1) }} onMore={cursor ? () => void more() : undefined}
     notice={<>{notice && <p role="alert">{notice}</p>}{pending && <p role="status">Pending {pending.kind}: {pending.path}. <button disabled={busy} onClick={() => void perform(pending)}>Retry exact operation</button></p>}</>}
     onCreate={value => { setKind(value); setName(''); setNotice(''); dialog.current?.showModal() }} />
+    <HomeCoordinator path={path} navigate={navigate} onCreated={refreshCreated} />
     <dialog ref={dialog} className="dashboard-dialog" aria-labelledby="workspace-create-title"><form onSubmit={event => {
       event.preventDefault()
       let value = name.trim()
