@@ -17,6 +17,7 @@ import uuid
 
 from notebooks.store import NotebookError, NotebookStore, source, source_hash
 from application.models import Task
+from agents.schema import SCHEMA as AGENT_SCHEMA, TABLES as AGENT_TABLES
 
 
 class ApplicationError(NotebookError):
@@ -48,7 +49,7 @@ SCHEMA = [
         parent_id TEXT REFERENCES records(id), revision INTEGER NOT NULL CHECK(revision>0),
         created_at REAL NOT NULL, updated_at REAL NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)),
         CHECK((kind='project' AND project_id IS NULL AND notebook_id IS NULL) OR
-              (kind IN ('conversation','message') AND project_id IS NULL AND notebook_id IS NOT NULL) OR
+              (kind IN ('conversation','message') AND project_id IS NULL) OR
               (kind!='project' AND project_id IS NOT NULL)))""",
     """CREATE TABLE memberships (notebook_id TEXT PRIMARY KEY REFERENCES catalog(id),
         project_id TEXT NOT NULL REFERENCES records(id), associated INTEGER NOT NULL CHECK(associated IN (0,1)))""",
@@ -120,10 +121,10 @@ class ApplicationStore:
             self.db.execute('PRAGMA journal_mode=WAL')
             self.db.execute('PRAGMA synchronous=FULL')
             version = self.db.execute('PRAGMA user_version').fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5, 6): raise ApplicationError('Unsupported application schema version', 503)
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7): raise ApplicationError('Unsupported application schema version', 503)
             # A v1 table rebuild must disable FK enforcement outside BEGIN; all
             # original rows and dependent tables are checked before commit.
-            if version == 1: self.db.execute('PRAGMA foreign_keys=OFF')
+            if 0 < version < 7: self.db.execute('PRAGMA foreign_keys=OFF')
             try:
                 with self.transaction():
                     if version == 0:
@@ -144,15 +145,19 @@ class ApplicationStore:
                         self.db.execute(PROJECT_INTENTS)
                         self.db.execute(PROJECT_BINDINGS)
                         self.db.execute('PRAGMA user_version=6')
+                    if version < 7:
+                        if version > 1: self._migrate_v7_records()
+                        for statement in AGENT_SCHEMA: self.db.execute(statement)
+                        self.db.execute('PRAGMA user_version=7')
                     if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='workspace_operations'").fetchone() is None:
                         raise ApplicationError('Missing workspace journal', 503)
-                    for name in ('project_intents', 'project_bindings'):
+                    for name in ('project_intents', 'project_bindings', *AGENT_TABLES):
                         if self.db.execute('SELECT 1 FROM sqlite_master WHERE name=?', (name,)).fetchone() is None:
-                            raise ApplicationError('Missing project identity table', 503)
+                            raise ApplicationError('Missing application journal table', 503)
                     if self.db.execute('PRAGMA foreign_key_check').fetchall():
                         raise ApplicationError('Application database integrity check failed', 503)
             finally:
-                if version == 1: self.db.execute('PRAGMA foreign_keys=ON')
+                if 0 < version < 7: self.db.execute('PRAGMA foreign_keys=ON')
             if self.db.execute('PRAGMA quick_check').fetchone()[0] != 'ok' or self.db.execute('PRAGMA foreign_key_check').fetchall():
                 raise ApplicationError('Application database integrity check failed', 503)
             os.fsync(self.boundary.fd)
@@ -171,6 +176,16 @@ class ApplicationStore:
             self.db.execute(statement)
         self.db.execute(SCHEMA[-2])
         self.db.execute('PRAGMA user_version=3')
+
+    def _migrate_v7_records(self):
+        # Permit workspace-scoped conversations/messages while retaining identities,
+        # sequence numbers, foreign-key references and append-only triggers.
+        self.db.execute(SCHEMA[1].replace('CREATE TABLE records', 'CREATE TABLE records_v7'))
+        columns = 'sequence,id,kind,project_id,notebook_id,parent_id,revision,created_at,updated_at,data'
+        self.db.execute(f'INSERT INTO records_v7 ({columns}) SELECT {columns} FROM records')
+        self.db.execute('DROP TABLE records')
+        self.db.execute('ALTER TABLE records_v7 RENAME TO records')
+        for statement in SCHEMA[6:10]: self.db.execute(statement)
 
     @contextmanager
     def transaction(self):
@@ -220,9 +235,10 @@ class ApplicationStore:
             if not row: raise ApplicationError('Notebook is not a present project member', 409)
 
     def _notebook_scope(self, notebook):
-        self.notebooks.open(notebook)
+        document = self.notebooks.open(notebook)
         if not self.db.execute('SELECT 1 FROM catalog WHERE id=? AND present=1', (notebook,)).fetchone():
             raise ApplicationError('Notebook is not present', 404)
+        return document
 
     def record_notebook_open(self, notebook):
         """Explicit navigation event; never called by notebook reads or execution."""
@@ -486,36 +502,44 @@ class ApplicationStore:
         return self._mutate(body.operation_id, 'conversation_create', body.model_dump(), work)
 
     def message_append(self, conversation, body, *, author_role='user'):
-        # Only trusted Python callers can select non-user authorship. REST has no role field.
+        return self._mutate(body.operation_id, 'message_append/' + conversation + '/' + author_role,
+                            body.model_dump(), lambda: self._append_message(conversation, body, author_role))
+
+    def _append_message(self, conversation, body, author_role):
+        """Shared message rules inside an already-owned application transaction."""
         if author_role not in {'user', 'coordinator', 'coding_agent', 'system/tool'}:
             raise ApplicationError('Invalid server author role')
-        def work():
-            row = self._row(conversation, 'conversation')
-            if row['project_id'] is not None and row['notebook_id'] is not None:
+        row = self._row(conversation, 'conversation')
+        if row['project_id'] is not None and row['notebook_id'] is not None:
+            raise ApplicationError('Historical notebook conversation is read-only', 409)
+        workspace = row['project_id'] is None and row['notebook_id'] is None
+        if workspace:
+            if not self.db.execute("SELECT 1 FROM agent_conversations WHERE conversation_id=? AND scope='workspace'", (conversation,)).fetchone():
+                raise ApplicationError('Unknown workspace conversation', 409)
+            if any(getattr(body, key) is not None for key in ('notebook_id', 'cell_id', 'document_revision', 'execution_receipt_id', 'task_id')):
+                raise ApplicationError('Workspace messages cannot attach unscoped notebook references')
+        elif row['project_id'] is None:
+            self._notebook_scope(row['notebook_id'])
+            canonical = self.db.execute('SELECT conversation_id FROM canonical_notebook_conversations WHERE notebook_id=?',
+                                        (row['notebook_id'],)).fetchone()
+            if canonical is None or canonical['conversation_id'] != conversation:
                 raise ApplicationError('Historical notebook conversation is read-only', 409)
-            if row['project_id'] is None:
-                self._notebook_scope(row['notebook_id'])
-                canonical = self.db.execute('SELECT conversation_id FROM canonical_notebook_conversations WHERE notebook_id=?',
-                                            (row['notebook_id'],)).fetchone()
-                if canonical is None or canonical['conversation_id'] != conversation:
-                    raise ApplicationError('Historical notebook conversation is read-only', 409)
-                self._adopt_unplaced(conversation, row['notebook_id'])
-            else: self._scope(row['project_id'], row['notebook_id'])
-            notebook = self._links(row['project_id'], row['notebook_id'], body.model_dump())
-            if row['project_id'] is None and body.message_id:
-                referenced = self._row(body.message_id, 'message')
-                if referenced['parent_id'] != conversation:
-                    raise ApplicationError('Message reference belongs to another conversation')
-            if body.parent_id:
-                parent = self._row(body.parent_id, 'message')
-                if parent['parent_id'] != conversation: raise ApplicationError('Reply belongs to another conversation')
-            data = body.model_dump(exclude={'operation_id'})
-            data.update(author_role=author_role, conversation_id=conversation)
-            if row['project_id'] is None:
-                cells = self.notebooks.open(row['notebook_id'])['cells']
-                data['placement_after_cell_id'] = cells[-1]['id'] if cells else None
-            return self._insert('message', row['project_id'], notebook, data, conversation)
-        return self._mutate(body.operation_id, 'message_append/' + conversation + '/' + author_role, body.model_dump(), work)
+            self._adopt_unplaced(conversation, row['notebook_id'])
+        else: self._scope(row['project_id'], row['notebook_id'])
+        notebook = None if workspace else self._links(row['project_id'], row['notebook_id'], body.model_dump())
+        if row['project_id'] is None and body.message_id:
+            referenced = self._row(body.message_id, 'message')
+            if referenced['parent_id'] != conversation:
+                raise ApplicationError('Message reference belongs to another conversation')
+        if body.parent_id:
+            parent = self._row(body.parent_id, 'message')
+            if parent['parent_id'] != conversation: raise ApplicationError('Reply belongs to another conversation')
+        data = body.model_dump(exclude={'operation_id'})
+        data.update(author_role=author_role, conversation_id=conversation)
+        if row['project_id'] is None and row['notebook_id'] is not None:
+            cells = self.notebooks.open(row['notebook_id'])['cells']
+            data['placement_after_cell_id'] = cells[-1]['id'] if cells else None
+        return self._insert('message', row['project_id'], notebook, data, conversation)
 
     def _validate_plan(self, project, notebook, tasks, roadmap=None):
         by_id = {t['id']: t for t in tasks}

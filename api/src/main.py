@@ -13,6 +13,8 @@ from notebooks.router import router as notebook_router
 from notebooks.store import NotebookStore, NotebookError
 from notebooks.service import NotebookService
 from application.store import ApplicationStore
+from agents.runtime import AgentRuntime
+from agents.router import router as agent_router
 from application.router import router as application_router
 from kernel.gateway_client import GatewayError
 from runtime.contracts import GatewayEndpoint, RuntimeErrorBase
@@ -32,7 +34,7 @@ from workspace.dashboard import DashboardObservation, router as dashboard_router
 
 
 def create_app(*, gateway_url: str | None = None, gateway_token: str | None = None,
-               runtime_provider=None, workspace_root: Path | None = None):
+               runtime_provider=None, workspace_root: Path | None = None, agent_provider=None):
     @asynccontextmanager
     async def lifespan(app):
         url = gateway_url or os.environ.get("EUROPA_GATEWAY_URL")
@@ -41,7 +43,7 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
         resources = None
         admission = guard = None
         registry = None
-        notebook_store = notebook_service = application_store = None
+        notebook_store = notebook_service = application_store = agent_runtime = None
         if runtime_provider is not None:
             provider = runtime_provider
             selection = "local"
@@ -112,17 +114,24 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
             notebook_service = NotebookService(notebook_store, supervisor)
             app.state.notebook_service = notebook_service
             app.state.dashboard_observation = DashboardObservation(app)
+            agent_runtime = AgentRuntime(app.state, agent_provider, gateway_token=token)
+            app.state.agent_runtime = agent_runtime
+            await agent_runtime.start()
             yield
         finally:
             try:
                 try:
-                    observation = getattr(app.state, 'dashboard_observation', None)
-                    if observation:
-                        await observation.close()
-                    if notebook_service:
-                        await notebook_service.close(supervisor.lifecycle.policy.grace if getattr(supervisor, 'lifecycle', None) else 30)
+                    if agent_runtime:
+                        await agent_runtime.close()
                 finally:
-                    await supervisor.close()
+                    try:
+                        observation = getattr(app.state, 'dashboard_observation', None)
+                        if observation:
+                            await observation.close()
+                        if notebook_service:
+                            await notebook_service.close(supervisor.lifecycle.policy.grace if getattr(supervisor, 'lifecycle', None) else 30)
+                    finally:
+                        await supervisor.close()
             finally:
                 if application_store:
                     application_store.close()
@@ -196,6 +205,7 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
     app.include_router(application_router, prefix="/api", tags=["application"])
     app.include_router(workspace_router, prefix="/api", tags=["workspace"])
     app.include_router(dashboard_router, prefix="/api", tags=["dashboard"])
+    app.include_router(agent_router, prefix="/api", tags=["agents"])
     assets = Path(__file__).resolve().parents[2] / 'web' / 'dist' / 'assets'
     if assets.is_dir():
         app.mount('/assets', StaticFiles(directory=assets), name='web-assets')

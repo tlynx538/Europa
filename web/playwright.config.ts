@@ -32,11 +32,12 @@ export default defineConfig({
     { name: 'sessions', testDir: './browser-dashboard-c' },
     { name: 'composition', testDir: './browser-dashboard', use: { baseURL: 'http://127.0.0.1:18173' } },
     { name: 'acceptance', testDir: './browser-acceptance' },
+    { name: 'agents', testDir: './browser-agents' },
   ],
   webServer: process.env.EUROPA_VM_ONLY === '1' ? [] : [
     { command: `../.venv/bin/python -m uvicorn main:app --app-dir ../api/src --host 127.0.0.1 --port ${port}`,
       url: `http://127.0.0.1:${port}/`, reuseExistingServer: false,
-      env: { EUROPA_WORKSPACE_ROOT: workspace, EUROPA_NOTEBOOK_ROOT: join(root, 'notebooks'), EUROPA_APPLICATION_ROOT: join(root, 'application'), EUROPA_RUNTIME_PROVIDER: 'local', EUROPA_GATEWAY_URL: '', EUROPA_GATEWAY_TOKEN: '' }, timeout: 30000 },
+      env: { EUROPA_WORKSPACE_ROOT: workspace, EUROPA_NOTEBOOK_ROOT: join(root, 'notebooks'), EUROPA_APPLICATION_ROOT: join(root, 'application'), EUROPA_RUNTIME_PROVIDER: 'local', EUROPA_GATEWAY_URL: '', EUROPA_GATEWAY_TOKEN: '', EUROPA_AGENT_PROVIDER: 'fake', EUROPA_AGENT_MODEL: 'fake-v1', EUROPA_AGENT_API_KEY: '' }, timeout: 30000 },
     { command: 'npm run dev -- --port 18173 --strictPort', url: 'http://127.0.0.1:18173', reuseExistingServer: false },
   ],
 })

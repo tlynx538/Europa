@@ -20,8 +20,8 @@ must remain bound to loopback.
   recovery, prewarming, and idle cleanup
 - REST APIs for notebooks, runtimes, and application records
 
-Europa does not currently provide multi-user authentication, uploads, agents,
-LLM providers, MCP integration, or distributed scheduling.
+Europa does not provide multi-user authentication, uploads, MCP integration, or
+distributed scheduling. Phase 4 introduces an opt-in durable agent harness.
 
 ## How it works
 
@@ -288,3 +288,23 @@ Containerd tests require approved Linux infrastructure and explicit
 Historical diagrams and earlier milestone reports may describe superseded
 architecture. Current behavior is defined by the implementation, current contracts,
 and the latest documentation linked above.
+
+## Agent provider configuration
+
+Agents are disabled by default. Set `EUROPA_AGENT_PROVIDER=fake` to exercise the
+deterministic test provider without network calls. The fake is a test fixture, not
+a general-purpose model. The 4A foundation is available through `/api/agents`;
+conversation and event history survive reload and backend restart.
+
+For an explicitly configured model, set `EUROPA_AGENT_PROVIDER` to
+`openai_compatible` or `openrouter`, set `EUROPA_AGENT_MODEL` to the exact model ID,
+and supply `EUROPA_AGENT_API_KEY` in the backend environment. Keep the key out of
+source, browser storage, and command output. `EUROPA_AGENT_BASE_URL` can override
+the provider's HTTPS base URL. `EUROPA_AGENT_TOOLS=0` allows a text-only adapter.
+`EUROPA_AGENT_TOKEN_PARAMETER=max_completion_tokens` selects that limit field for
+models requiring it. Invalid configuration disables the agent service without
+disabling Files or notebook editing.
+
+See [the harness design](docs/phase4-harness-design.md) and
+[validation evidence](docs/phase4-validation.md). The harness uses bounded, scoped
+context and explicit approvals; it does not grant models direct access to tools.

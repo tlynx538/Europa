@@ -250,6 +250,20 @@ async def test_canonical_http_create_recovery_and_legacy_history(state, monkeypa
         assert (await http.post(f"/api/conversations/{canonical['id']}/messages", json={'operation_id': op(), 'content': 'spoof', 'author_role': 'system/tool'})).status_code == 422
 
 
+def previous_agent_schema(db):
+    """Restore the pre-v7 table shape in synthetic older-version fixtures."""
+    from agents.schema import TABLES
+    for table in reversed(TABLES): db.execute('DROP TABLE ' + table)
+    previous = SCHEMA[1].replace('CREATE TABLE records', 'CREATE TABLE records_previous').replace(
+        "(kind IN ('conversation','message') AND project_id IS NULL)",
+        "(kind IN ('conversation','message') AND project_id IS NULL AND notebook_id IS NOT NULL)")
+    db.execute(previous)
+    db.execute('INSERT INTO records_previous SELECT * FROM records')
+    db.execute('DROP TABLE records')
+    db.execute('ALTER TABLE records_previous RENAME TO records')
+    for statement in SCHEMA[6:10]: db.execute(statement)
+
+
 def test_v1_migration_preserves_legacy_records_and_integrity(tmp_path):
     nb = NotebookStore(tmp_path / 'docs')
     nid = nb.create()['metadata']['europa']['notebook_id']
@@ -259,7 +273,7 @@ def test_v1_migration_preserves_legacy_records_and_integrity(tmp_path):
     legacy_check = "(kind='project' AND project_id IS NULL AND notebook_id IS NULL) OR\n              (kind!='project' AND project_id IS NOT NULL)"
     schema = [statement for statement in SCHEMA if 'canonical_notebook_conversations' not in statement and 'canonical_message_placements' not in statement and 'recent_opens' not in statement]
     schema[1] = schema[1].replace(
-        "(kind='project' AND project_id IS NULL AND notebook_id IS NULL) OR\n              (kind IN ('conversation','message') AND project_id IS NULL AND notebook_id IS NOT NULL) OR\n              (kind!='project' AND project_id IS NOT NULL)", legacy_check)
+        "(kind='project' AND project_id IS NULL AND notebook_id IS NULL) OR\n              (kind IN ('conversation','message') AND project_id IS NULL) OR\n              (kind!='project' AND project_id IS NOT NULL)", legacy_check)
     for statement in schema: db.execute(statement)
     db.execute('INSERT INTO catalog VALUES (?,1)', (nid,))
     now = 12345.5
@@ -283,7 +297,7 @@ def test_v1_migration_preserves_legacy_records_and_integrity(tmp_path):
         assert canonical['id'] not in {'a','b'}
         assert [r['id'] for r in app.legacy_notebook_conversations(nid)['items']] == ['a','b']
         with app.transaction():
-            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 6
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 7
             assert not app.db.execute('PRAGMA foreign_key_check').fetchall()
             assert app.db.execute('SELECT response FROM operations WHERE id=?', ('old-op',)).fetchone()[0] == '{"id": "m"}'
             assert app.db.execute('SELECT data FROM versions WHERE roadmap_id=?', ('r',)).fetchone()[0] == '{"objective": "Old plan", "tasks": []}'
@@ -324,11 +338,12 @@ def test_v2_upgrade_preserves_records_operations_and_snapshots_only_canonical(tm
     db.execute('DROP TABLE workspace_operations')
     db.execute('DROP TABLE project_intents')
     db.execute('DROP TABLE project_bindings')
+    previous_agent_schema(db)
     db.execute('PRAGMA user_version=2'); db.commit(); db.close()
     app = ApplicationStore(tmp_path / 'app', nb)
     try:
         with app.transaction():
-            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 6
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 7
             assert not app.db.execute('PRAGMA foreign_key_check').fetchall()
             assert app.db.execute('SELECT * FROM records WHERE id=?', (old['id'],)).fetchone() == raw
         assert app.listing('message', parent=c['id'])['items'][0]['data']['placement_after_cell_id'] == anchor
@@ -358,11 +373,12 @@ def test_v3_upgrade_preserves_existing_rows_and_notebook_bytes(tmp_path):
     db.execute('DROP TABLE workspace_operations')
     db.execute('DROP TABLE project_intents')
     db.execute('DROP TABLE project_bindings')
+    previous_agent_schema(db)
     db.execute('PRAGMA user_version=3'); db.commit(); db.close()
     app = ApplicationStore(tmp_path / 'app', nb)
     try:
         with app.transaction():
-            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 6
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 7
             assert not app.db.execute('PRAGMA foreign_key_check').fetchall()
             assert [tuple(row) for row in app.db.execute('SELECT * FROM records ORDER BY sequence')] == records
             assert [tuple(row) for row in app.db.execute('SELECT * FROM operations ORDER BY id')] == operations
@@ -386,11 +402,12 @@ def test_v4_upgrade_keeps_application_records_and_private_notebooks(tmp_path):
     db.execute('DROP TABLE workspace_operations')
     db.execute('DROP TABLE project_intents')
     db.execute('DROP TABLE project_bindings')
+    previous_agent_schema(db)
     db.execute('PRAGMA user_version=4'); db.commit(); db.close()
     app = ApplicationStore(tmp_path / 'app', nb)
     try:
         with app.transaction():
-            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 6
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 7
             assert tuple(app.db.execute('SELECT * FROM records WHERE id=?', (p['id'],)).fetchone()) == previous
             assert app.db.execute("SELECT 1 FROM sqlite_master WHERE name='workspace_operations'").fetchone()
         assert (tmp_path / 'app' / 'application.sqlite3').stat().st_mode & 0o777 == before == 0o600
@@ -408,12 +425,13 @@ def test_v5_upgrade_adds_project_bindings_without_touching_legacy_records(tmp_pa
         "SELECT 1 FROM sqlite_master WHERE name='project_bindings'").fetchone() else None
     db.execute('DROP TABLE project_intents') if db.execute(
         "SELECT 1 FROM sqlite_master WHERE name='project_intents'").fetchone() else None
+    previous_agent_schema(db)
     db.execute('PRAGMA user_version=5'); db.commit(); db.close()
     app = ApplicationStore(tmp_path / 'app', nb)
     try:
         assert app.get(old['id'], 'project') == old
         with app.transaction():
-            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 6
+            assert app.db.execute('PRAGMA user_version').fetchone()[0] == 7
             assert app.db.execute('SELECT count(*) FROM project_bindings').fetchone()[0] == 0
     finally:
         app.close(); nb.close()
