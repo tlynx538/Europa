@@ -68,6 +68,9 @@ For autonomous OpenCode work on the notebook UI, first read
 directions supersede earlier sidebar/docking designs. Follow
 [the future agent interaction contract](docs/notebook-agent-interaction.md)
 when planning engine work; it does not authorize starting that milestone.
+For the Phase 4B Home Coordinator, read
+[its design](docs/phase4b-home-coordinator.md) and
+[validation report](docs/phase4b-validation.md).
 
 - On this development machine, use one OpenCode worker and one heavy validation
   job at a time. Do not recursively spawn agents or run duplicate browser suites.

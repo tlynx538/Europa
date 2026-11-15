@@ -1,0 +1,46 @@
+/* Home Coordinator and agent run panels. Additive; uses only existing theme variables. */
+.home-coordinator { margin: 0 0 18px; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; }
+.home-coordinator > summary { display: flex; align-items: baseline; gap: 10px; padding: 10px 14px; cursor: pointer; font-size: 14px; }
+.home-coordinator[open] > summary { border-bottom: 1px solid var(--line); }
+.home-coordinator-title { font-weight: 500; }
+.home-provider { color: var(--muted); font-size: 12px; }
+.home-thread { max-height: 46vh; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; background: var(--canvas); }
+.home-empty { margin: 0; color: var(--muted); font-size: 13px; }
+.home-turn { display: flex; flex-direction: column; gap: 6px; }
+.home-message { max-width: 78ch; padding: 8px 11px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); }
+.home-message[data-author="user"] { align-self: flex-end; background: var(--tint); }
+.home-message h4 { margin: 0 0 3px; font-size: 11px; font-weight: 500; color: var(--muted); }
+.home-message p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+.home-message button { margin-top: 7px; border: 1px solid var(--accent); color: var(--accent); background: var(--surface); }
+.home-composer { display: flex; gap: 8px; align-items: flex-end; padding: 10px 14px; border-top: 1px solid var(--line); }
+.home-composer textarea { flex: 1; min-width: 0; resize: vertical; min-height: 38px; max-height: 30vh; padding: 7px 9px; border: 1px solid var(--line); border-radius: 3px; font: inherit; font-size: 13px; background: var(--surface); }
+.home-composer-buttons { display: flex; gap: 6px; }
+.home-coordinator > .agent-warning, .home-coordinator > .agent-error { margin: 8px 14px 0; }
+
+.agent-run { border: 1px solid var(--line); border-radius: 4px; background: var(--surface); font-size: 12px; }
+.agent-run > summary { padding: 6px 10px; cursor: pointer; color: var(--muted); }
+.agent-run[open] > summary { border-bottom: 1px solid var(--line); }
+.agent-run.state-failed > summary, .agent-run.state-interrupted > summary { color: var(--error); }
+.agent-run.state-waiting_for_approval > summary { color: var(--warning); }
+.agent-run > :not(summary) { margin: 8px 10px; }
+.agent-calls { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.agent-calls small { color: var(--muted); }
+.agent-calls li[data-state="failed"] small, .agent-calls li[data-state="uncertain"] small { color: var(--error); }
+.agent-calls p { margin: 2px 0 0; color: var(--muted); overflow-wrap: anywhere; }
+.agent-approval { border: 1px solid var(--warning); border-radius: 4px; padding: 10px 12px; background: var(--surface); }
+.agent-approval h3 { margin: 0 0 4px; font-size: 13px; font-weight: 500; }
+.agent-purpose { margin: 0 0 6px; color: var(--muted); overflow-wrap: anywhere; }
+.agent-actions { margin: 0 0 6px; padding-left: 18px; overflow-wrap: anywhere; }
+.agent-expiry, .agent-decided { margin: 0 0 8px; color: var(--muted); }
+.agent-buttons { display: flex; gap: 6px; }
+.agent-approve { border: 1px solid var(--accent); background: var(--accent); color: var(--surface); }
+.agent-stop { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.agent-stop small { color: var(--muted); }
+.agent-warning { color: var(--warning); margin: 6px 0; font-size: 12px; }
+.agent-error { color: var(--error); margin: 6px 0; font-size: 12px; overflow-wrap: anywhere; }
+
+@container dashboard (max-width: 480px) {
+  .home-composer { flex-direction: column; align-items: stretch; }
+  .home-composer-buttons { justify-content: flex-end; }
+  .home-message { max-width: 100%; }
+}
