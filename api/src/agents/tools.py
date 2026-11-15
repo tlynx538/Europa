@@ -225,6 +225,24 @@ class CreateProjectNotebookArgs(Args):
     purpose: str = Field(min_length=1, max_length=1000, description='Why this notebook exists; recorded in its conversation')
 
 
+def _entry(browser, directory, name, pages=100):
+    """Find `name` in a directory across listing pages. A name differing only in
+    case is a conflict: case-insensitive filesystems would treat it as the same entry."""
+    cursor = None
+    for _ in range(pages):
+        page = browser.list(directory, cursor, 100)
+        for item in page['items']:
+            if item['name'] == name:
+                return item
+            if item['name'].casefold() == name.casefold():
+                where = f'{directory}/{item["name"]}' if directory else item['name']
+                raise ToolError(f'{where} already exists (differs only in letter case)', 'conflict')
+        cursor = page.get('next_cursor')
+        if cursor is None:
+            return None
+    raise ToolError(f"{directory or 'The workspace root'} has too many entries to verify the name is free", 'conflict')
+
+
 async def bind_create(ctx, args):
     def work():
         browser = ctx.services.workspace
@@ -232,22 +250,19 @@ async def bind_create(ctx, args):
         notebook_path = '/'.join(p for p in (project_path, args.notebook_name) if p)
         create_project = False
         if project_path:
-            root = browser.list('', None, 100)
-            names = {i['name']: i for i in root['items']}
-            existing = names.get(project_path)
+            existing = _entry(browser, '', project_path)
             if existing and not existing.get('project_id'):
-                raise ToolError(f'A folder named {project_path!r} already exists and is not a Europa project', 'conflict')
+                raise ToolError(f'A folder or file named {project_path!r} already exists and is not a Europa project', 'conflict')
             create_project = existing is None
-            if existing:
-                listing = browser.list(project_path, None, 100)
-                if any(i['name'] == args.notebook_name for i in listing['items']):
-                    raise ToolError(f'{notebook_path} already exists', 'conflict')
-        else:
-            root = browser.list('', None, 100)
-            if any(i['name'] == args.notebook_name for i in root['items']):
+            if existing and _entry(browser, project_path, args.notebook_name):
                 raise ToolError(f'{notebook_path} already exists', 'conflict')
+        elif _entry(browser, '', args.notebook_name):
+            raise ToolError(f'{notebook_path} already exists', 'conflict')
         return {'project_path': project_path, 'create_project': create_project, 'notebook_path': notebook_path}
-    return await run_sync(work)
+    try:
+        return await run_sync(work)
+    except WorkspaceError as exc:
+        raise ToolError(f'Could not verify the target: {exc}', 'conflict' if exc.status_code == 409 else 'error') from None
 
 
 def preview_create(_ctx, args, binding):
