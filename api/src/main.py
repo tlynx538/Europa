@@ -29,10 +29,11 @@ from workspace.router import router as workspace_router
 from workspace.mutation import WorkspaceMutation
 from workspace.notebooks import WorkspaceNotebookStore
 from workspace.dashboard import DashboardObservation, router as dashboard_router
+from agents.router import router as agent_router
 
 
 def create_app(*, gateway_url: str | None = None, gateway_token: str | None = None,
-               runtime_provider=None, workspace_root: Path | None = None):
+               runtime_provider=None, workspace_root: Path | None = None, agent_provider=None, agent_options=None):
     @asynccontextmanager
     async def lifespan(app):
         url = gateway_url or os.environ.get("EUROPA_GATEWAY_URL")
@@ -112,10 +113,14 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
             notebook_service = NotebookService(notebook_store, supervisor)
             app.state.notebook_service = notebook_service
             app.state.dashboard_observation = DashboardObservation(app)
+            await start_agents(app, notebook_store, application_store)
             yield
         finally:
             try:
                 try:
+                    agents = getattr(app.state, 'agent_runtime', None)
+                    if agents:
+                        await agents.close()
                     observation = getattr(app.state, 'dashboard_observation', None)
                     if observation:
                         await observation.close()
@@ -133,6 +138,21 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
                 if guard:
                     guard.close()
                 app.state.workspace.close()
+
+    async def start_agents(app, notebook_store, application_store):
+        from agents.providers import configured_provider
+        from agents.runtime import AgentRuntime, Services
+        app.state.agent_runtime = None
+        provider, reason = (agent_provider, None) if agent_provider is not None else configured_provider()
+        app.state.agent_disabled_reason = reason
+        if provider is None:
+            return
+        services = Services(app=application_store, notebooks=notebook_store, workspace=app.state.workspace,
+                            mutation=app.state.workspace_mutation,
+                            notebook_service=lambda: getattr(app.state, 'notebook_service', None))
+        runtime = AgentRuntime(services, provider, **(agent_options or {}))
+        await runtime.start()
+        app.state.agent_runtime = runtime
 
     app = FastAPI(lifespan=lifespan)
     app.state.workspace = WorkspaceBrowser(workspace_root or Path(os.environ.get('EUROPA_WORKSPACE_ROOT', os.getcwd())))
@@ -196,6 +216,7 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
     app.include_router(application_router, prefix="/api", tags=["application"])
     app.include_router(workspace_router, prefix="/api", tags=["workspace"])
     app.include_router(dashboard_router, prefix="/api", tags=["dashboard"])
+    app.include_router(agent_router, prefix="/api", tags=["agents"])
     assets = Path(__file__).resolve().parents[2] / 'web' / 'dist' / 'assets'
     if assets.is_dir():
         app.mount('/assets', StaticFiles(directory=assets), name='web-assets')

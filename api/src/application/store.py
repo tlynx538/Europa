@@ -17,6 +17,9 @@ import uuid
 
 from notebooks.store import NotebookError, NotebookStore, source, source_hash
 from application.models import Task
+from agents.schema import AGENT_SCHEMA, RECORDS_V7, RECORD_DEPENDENTS
+
+SCHEMA_VERSION = 7
 
 
 class ApplicationError(NotebookError):
@@ -120,10 +123,11 @@ class ApplicationStore:
             self.db.execute('PRAGMA journal_mode=WAL')
             self.db.execute('PRAGMA synchronous=FULL')
             version = self.db.execute('PRAGMA user_version').fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5, 6): raise ApplicationError('Unsupported application schema version', 503)
-            # A v1 table rebuild must disable FK enforcement outside BEGIN; all
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7): raise ApplicationError('Unsupported application schema version', 503)
+            # v1 and v7 table rebuilds must disable FK enforcement outside BEGIN; all
             # original rows and dependent tables are checked before commit.
-            if version == 1: self.db.execute('PRAGMA foreign_keys=OFF')
+            rebuild = version < SCHEMA_VERSION
+            if rebuild: self.db.execute('PRAGMA foreign_keys=OFF')
             try:
                 with self.transaction():
                     if version == 0:
@@ -144,6 +148,8 @@ class ApplicationStore:
                         self.db.execute(PROJECT_INTENTS)
                         self.db.execute(PROJECT_BINDINGS)
                         self.db.execute('PRAGMA user_version=6')
+                    if version < 7:
+                        self._migrate_v7()
                     if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='workspace_operations'").fetchone() is None:
                         raise ApplicationError('Missing workspace journal', 503)
                     for name in ('project_intents', 'project_bindings'):
@@ -152,7 +158,7 @@ class ApplicationStore:
                     if self.db.execute('PRAGMA foreign_key_check').fetchall():
                         raise ApplicationError('Application database integrity check failed', 503)
             finally:
-                if version == 1: self.db.execute('PRAGMA foreign_keys=ON')
+                if rebuild: self.db.execute('PRAGMA foreign_keys=ON')
             if self.db.execute('PRAGMA quick_check').fetchone()[0] != 'ok' or self.db.execute('PRAGMA foreign_key_check').fetchall():
                 raise ApplicationError('Application database integrity check failed', 503)
             os.fsync(self.boundary.fd)
@@ -171,6 +177,34 @@ class ApplicationStore:
             self.db.execute(statement)
         self.db.execute(SCHEMA[-2])
         self.db.execute('PRAGMA user_version=3')
+
+    def _migrate_v7(self):
+        # Workspace (Home) conversation scope plus durable agent harness tables.
+        # Same rebuild pattern as v1: identities, sequences, data and FKs preserved.
+        self.db.execute(RECORDS_V7.replace('CREATE TABLE records', 'CREATE TABLE records_v7'))
+        columns = 'sequence,id,kind,project_id,notebook_id,parent_id,revision,created_at,updated_at,data'
+        self.db.execute(f'INSERT INTO records_v7 ({columns}) SELECT {columns} FROM records')
+        self.db.execute('DROP TABLE records')
+        self.db.execute('ALTER TABLE records_v7 RENAME TO records')
+        for statement in RECORD_DEPENDENTS + AGENT_SCHEMA:
+            self.db.execute(statement)
+        self.db.execute('PRAGMA user_version=7')
+
+    @contextmanager
+    def bookkeeping(self):
+        """Agent harness transaction: same locks/BEGIN IMMEDIATE, no catalog rescan."""
+        try:
+            with self.notebooks.locked(), self.mutex:
+                if self.db is None: raise ApplicationError('Application storage is closed', 503)
+                try:
+                    self.db.execute('BEGIN IMMEDIATE')
+                    yield self.db
+                    self.db.commit()
+                except BaseException:
+                    self.db.rollback()
+                    raise
+        except sqlite3.Error as exc:
+            raise ApplicationError('Agent storage transaction failed', 503) from exc
 
     @contextmanager
     def transaction(self):
@@ -266,6 +300,26 @@ class ApplicationStore:
             SELECT id,? FROM records WHERE parent_id=? AND kind='message'
               AND json_type(data,'$.placement_after_cell_id') IS NULL
             ON CONFLICT(message_id) DO NOTHING""", (anchor, conversation))
+
+    def _workspace_conversation(self, conversation):
+        return self.db.execute('SELECT 1 FROM workspace_conversations WHERE conversation_id=?',
+                               (conversation,)).fetchone() is not None
+
+    def ensure_workspace_conversation(self):
+        """Get or create the most recent Home (workspace-scoped) conversation."""
+        with self._mutation_transaction():
+            row = self.db.execute('SELECT conversation_id FROM workspace_conversations '
+                                  'ORDER BY created_at DESC, rowid DESC LIMIT 1').fetchone()
+            if row: return self._view(self._row(row['conversation_id'], 'conversation'))
+            return self._new_workspace_conversation()
+
+    def _new_workspace_conversation(self):
+        record = self._insert('conversation', None, None, {'title': 'Home'})
+        self.db.execute('INSERT INTO workspace_conversations VALUES (?,?)', (record['id'], time.time()))
+        return record
+
+    def workspace_conversation_create(self, operation_id):
+        return self._mutate(operation_id, 'workspace_conversation_create', {}, self._new_workspace_conversation)
 
     def legacy_notebook_conversations(self, notebook, *, after=0, limit=50):
         if not 1 <= limit <= 100 or after < 0: raise ApplicationError('Invalid pagination')
@@ -493,6 +547,8 @@ class ApplicationStore:
             row = self._row(conversation, 'conversation')
             if row['project_id'] is not None and row['notebook_id'] is not None:
                 raise ApplicationError('Historical notebook conversation is read-only', 409)
+            if row['project_id'] is None and row['notebook_id'] is None:
+                return self._workspace_message(row, body, author_role)
             if row['project_id'] is None:
                 self._notebook_scope(row['notebook_id'])
                 canonical = self.db.execute('SELECT conversation_id FROM canonical_notebook_conversations WHERE notebook_id=?',
@@ -516,6 +572,19 @@ class ApplicationStore:
                 data['placement_after_cell_id'] = cells[-1]['id'] if cells else None
             return self._insert('message', row['project_id'], notebook, data, conversation)
         return self._mutate(body.operation_id, 'message_append/' + conversation + '/' + author_role, body.model_dump(), work)
+
+    def _workspace_message(self, row, body, author_role):
+        if not self._workspace_conversation(row['id']):
+            raise ApplicationError('Conversation scope is not writable', 409)
+        if any(getattr(body, name) for name in ('task_id', 'cell_id', 'document_revision', 'execution_receipt_id')):
+            raise ApplicationError('Home messages cannot reference tasks, cells, revisions or receipts')
+        for reference in (body.message_id, body.parent_id):
+            if reference and self._row(reference, 'message')['parent_id'] != row['id']:
+                raise ApplicationError('Message reference belongs to another conversation')
+        if body.notebook_id: self._notebook_scope(body.notebook_id)
+        data = body.model_dump(exclude={'operation_id'})
+        data.update(author_role=author_role, conversation_id=row['id'])
+        return self._insert('message', None, None, data, row['id'])
 
     def _validate_plan(self, project, notebook, tasks, roadmap=None):
         by_id = {t['id']: t for t in tasks}
