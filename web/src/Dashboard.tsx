@@ -16,6 +16,7 @@ type Props = {
   loading?: boolean; error?: string; sessionError?: string; notice?: ReactNode; actionsDisabled?: boolean
   onHome?: () => void; onCatalog?: (kind: 'projects' | 'notebooks') => void; onMore?: () => void; recentUnavailable?: boolean; recentError?: string; onRecentMenu?: () => void
   sessionNotice?: string; onSessionsMore?: () => void; onSessionsPrevious?: () => void
+  coordinator?: ReactNode
 }
 
 function FileIcon({ kind }: { kind: DashboardEntry['kind'] }) {
@@ -49,6 +50,7 @@ export function Dashboard(props: Props) {
     <header className="dashboard-header"><div><a href="/" className="dashboard-wordmark" onClick={event => { event.preventDefault(); props.onHome ? props.onHome() : (go([]), onTab('files')) }}><span aria-hidden="true" className="europa-mark" />Europa</a><span className="dashboard-header-actions"><button onClick={() => showDialog('settings')}>Preferences</button><span>Notebook workspace</span></span></div></header>
     <div className="dashboard-menu"><Menubar.Root aria-label="Workspace menu"><Menu name="File"><Menubar.Item className="menu-row" onSelect={() => { props.onHome ? props.onHome() : (go([]), onTab('files')) }}>Home</Menubar.Item><Menubar.Item className="menu-row" disabled={selected.length !== 1 || props.actionsDisabled} onSelect={() => props.onOpen(selected[0])}>Open selected</Menubar.Item>{props.onCatalog && <><Menubar.Item className="menu-row" onSelect={() => props.onCatalog?.('projects')}>Existing catalog projects</Menubar.Item><Menubar.Item className="menu-row" onSelect={() => props.onCatalog?.('notebooks')}>Existing catalog notebooks</Menubar.Item></>}</Menu><Menu name="View"><Menubar.Item className="menu-row" onSelect={() => onTab('files')}>Files</Menubar.Item><Menubar.Item className="menu-row" onSelect={() => onTab('running')}>Running</Menubar.Item><Menubar.Item className="menu-row" onSelect={props.onRefresh}>Refresh</Menubar.Item></Menu><Menu name="Settings"><Menubar.Item className="menu-row" onSelect={() => showDialog('settings')}>Preferences</Menubar.Item></Menu><Menu name="Help"><Menubar.Item className="menu-row" onSelect={() => showDialog('help')}>Keyboard shortcuts</Menubar.Item></Menu></Menubar.Root></div>
     <main className="dashboard-workspace" aria-label="Workspace">
+      {props.coordinator}
       <div className="dashboard-tabs" role="tablist" aria-label="Workspace views" onKeyDown={event => {
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
         event.preventDefault(); const index = event.key === 'Home' ? 0 : event.key === 'End' ? 1 : tab === 'files' ? 1 : 0

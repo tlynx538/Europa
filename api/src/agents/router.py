@@ -75,11 +75,13 @@ async def status(request: Request):
 
 @router.get('/home/conversation')
 async def home_conversation(request: Request):
+    runtime(request)  # Disabled agents leave Home untouched: no conversation is created.
     return await asyncio.to_thread(request.app.state.application_store.ensure_workspace_conversation)
 
 
 @router.post('/home/conversations', status_code=201)
 async def new_home_conversation(request: Request, body: Operation):
+    runtime(request)
     return await asyncio.to_thread(request.app.state.application_store.workspace_conversation_create, body.operation_id)
 
 

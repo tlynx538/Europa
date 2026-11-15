@@ -5,7 +5,7 @@ import uuid
 
 import httpx
 
-from agents.providers import FakeProvider, ModelResponse, ToolCallRequest
+from agents.providers import FakeProvider, ModelResponse, Provider, ToolCallRequest
 from agents.runtime import AgentRuntime, Services
 from application import models as m
 from application.store import ApplicationStore
@@ -30,6 +30,11 @@ def calls(*items, note=''):
     return ModelResponse(content=note, tool_calls=[ToolCallRequest(id='c' + uuid.uuid4().hex[:8], name=n, arguments=json.dumps(a)) for n, a in items])
 
 
+def provider_for(script):
+    """A ready provider (FakeProvider, DemoProvider, ...) or a FakeProvider script."""
+    return script if isinstance(script, Provider) else FakeProvider(script)
+
+
 class Harness:
     def __init__(self, tmp_path, script, *, notebook_service=None, runtime_options=None):
         self.tmp_path = tmp_path
@@ -43,7 +48,7 @@ class Harness:
         self.app.state.application_store = self.application
         self.app.state.workspace_mutation = self.mutation
         self.app.state.notebook_service = notebook_service
-        self.provider = script if isinstance(script, FakeProvider) else FakeProvider(script)
+        self.provider = provider_for(script)
         self.runtime_options = runtime_options or {}
         self.runtime = None
 
@@ -59,7 +64,7 @@ class Harness:
         """Simulate a control-plane restart over the same durable storage."""
         await self.stop()
         if script is not None:
-            self.provider = script if isinstance(script, FakeProvider) else FakeProvider(script)
+            self.provider = provider_for(script)
         await self.start()
 
     async def stop(self):
