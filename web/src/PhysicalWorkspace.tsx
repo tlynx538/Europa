@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { json, request } from './api'
 import { Dashboard, type DashboardEntry } from './Dashboard'
+import { HomeCoordinator } from './HomeCoordinator'
 import { useDashboardData } from './useDashboardData'
 import type { Navigate } from './Navigation'
 
@@ -69,7 +70,8 @@ export function PhysicalWorkspace({ path, tab, navigate }: { path: string; tab: 
     actionsDisabled={busy || !!pending || !loaded || !!error || loading}
     onRefresh={() => { data.refreshRecent(); if (tab === 'running') data.refreshSessions(); else setRefresh(value => value + 1) }} onMore={cursor ? () => void more() : undefined}
     notice={<>{notice && <p role="alert">{notice}</p>}{pending && <p role="status">Pending {pending.kind}: {pending.path}. <button disabled={busy} onClick={() => void perform(pending)}>Retry exact operation</button></p>}</>}
-    onCreate={value => { setKind(value); setName(''); setNotice(''); dialog.current?.showModal() }} />
+    onCreate={value => { setKind(value); setName(''); setNotice(''); dialog.current?.showModal() }}
+    coordinator={path === '' ? <HomeCoordinator navigate={navigate} onWorkspaceChanged={() => setRefresh(value => value + 1)} /> : undefined} />
     <dialog ref={dialog} className="dashboard-dialog" aria-labelledby="workspace-create-title"><form onSubmit={event => {
       event.preventDefault()
       let value = name.trim()
