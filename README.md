@@ -20,8 +20,14 @@ must remain bound to loopback.
   recovery, prewarming, and idle cleanup
 - REST APIs for notebooks, runtimes, and application records
 
-Europa does not currently provide multi-user authentication, uploads, agents,
-LLM providers, MCP integration, or distributed scheduling.
+- An optional, disabled-by-default Home Coordinator agent that can propose and,
+  with explicit approval, create one project folder and notebook (Phase 4B)
+
+Europa does not currently provide multi-user authentication, uploads, MCP
+integration, or distributed scheduling. Agent support is limited to the Home
+Coordinator described below; it is off unless an agent provider is configured, and
+only the deterministic demo provider and mocked adapters have been validated (real
+LLM providers have not been exercised).
 
 ## How it works
 
@@ -206,6 +212,27 @@ For the complete runtime configuration, consult:
 - [Runtime prewarming](docs/runtime-prewarming.md)
 - [Runtime lifecycle and idle cleanup](docs/runtime-lifecycle.md)
 
+## Home Coordinator (Phase 4B)
+
+From Europa Home, an optional Coordinator panel discusses an objective and may propose
+one project folder and one notebook. Nothing is created without an approval bound to
+the exact previewed actions; creation uses the existing journaled workspace APIs and
+never overwrites. The panel is not shown unless agents are configured:
+
+| Variable | Purpose |
+|---|---|
+| `EUROPA_AGENT_PROVIDER` | `demo`, `openai` (OpenAI-compatible) or `openrouter`; unset disables agents |
+| `EUROPA_AGENT_MODEL` | Model name for `openai`/`openrouter` |
+| `EUROPA_AGENT_BASE_URL` | Chat Completions base URL (HTTPS except loopback) |
+| `EUROPA_AGENT_API_KEY` | Provider key; falls back to `OPENAI_API_KEY` / `OPENROUTER_API_KEY` |
+
+`EUROPA_AGENT_PROVIDER=demo` uses a deterministic, rule-based demo provider (not an
+LLM), for example "I want to understand a simple Markov chain." proposes
+`Markov Chain/markov-chain.ipynb`. Keys are read from the environment only and are
+never stored. Schema v7 is forward-only: back up `application.sqlite3` before
+upgrading existing data. See [Home Coordinator](docs/phase4b-home-coordinator.md) and
+[Phase 4B validation](docs/phase4b-validation.md).
+
 ## API overview
 
 OpenAPI and Swagger documentation are available while Europa is running:
@@ -222,6 +249,8 @@ Major API groups:
 - `/api/comments` — cell comment threads
 - `/api/runtime` — runtime status, provisioning, cleanup, and diagnostics
 - `/api/kernel` — low-level Gateway-compatible kernel operations
+- `/api/agent` — agent status, Home conversation, runs, events, cancellation and approvals
+  (503 unless an agent provider is configured, except `/api/agent/status`)
 
 See [notebook persistence](docs/notebook-persistence.md) and
 [conversational notebooks](docs/conversational-notebooks.md) for detailed API
@@ -269,6 +298,13 @@ cd web
 npm run test:browser
 ```
 
+The Home Coordinator journeys use a separate config with the demo provider on port 18400:
+
+```sh
+cd web
+npx playwright test -c playwright.agent.config.ts
+```
+
 Containerd tests require approved Linux infrastructure and explicit
 `--run-containerd`. Skipped integration tests are not successful validation.
 
@@ -279,6 +315,8 @@ Containerd tests require approved Linux infrastructure and explicit
 - [Phase 3F-B navigation validation](docs/phase3f-b-validation.md)
 - [Phase 3F-D UI recovery validation](docs/phase3f-d-validation.md)
 - [Phase 3G notebook UX validation](docs/phase3g-validation.md)
+- [Phase 4B Home Coordinator](docs/phase4b-home-coordinator.md) and
+  [validation](docs/phase4b-validation.md)
 - [Notebook persistence](docs/notebook-persistence.md)
 - [Projects and conversations](docs/conversational-notebooks.md)
 - [Runtime architecture](docs/runtime-provider.md)
