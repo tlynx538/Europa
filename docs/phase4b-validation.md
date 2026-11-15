@@ -14,7 +14,8 @@ Google Chrome 156.0.8078.80. `SSL_CERT_FILE` unset for Python runs.
 | `3ec07b2` | Home Coordinator backend tests (`tests/test_agent_home.py`, 25 tests) |
 | `ee16310` | Home Coordinator panel (frontend) and vitest tests (13 tests) |
 | `a6f9083` | Agent browser journeys (`web/playwright.agent.config.ts`, `web/browser-agent/`) and screenshots |
-| (docs commit) | This report, the 4B design doc, README/AGENTS updates, owner brief |
+| `94b6886` | This report, the 4B design doc, README/AGENTS updates, owner brief |
+| (review cycle 1 commit) | Agent spec selector fix; coordinator validation results |
 
 Python sources (`api/`, `tests/`) are unchanged after `3ec07b2`, and `web/src` is
 unchanged after `ee16310`, so the counts below apply to the current sources.
@@ -27,14 +28,45 @@ unchanged after `ee16310`, so the counts below apply to the current sources.
 | Python suite (no Gateway) | `.venv/bin/python -m pytest -q` | **353 passed, 105 skipped** (PR #5 baseline 328 passed / 105 skipped; +25 new) |
 | Frontend unit tests | `cd web && npm test` | **107 passed** in 19 files (baseline 94; +13 new) |
 | Type check and build | `cd web && npm run build` | passed (`tsc --noEmit` and Vite build) |
-| Agent browser journeys | `cd web && EUROPA_CHROME='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' npx playwright test -c playwright.agent.config.ts` | **3 passed** (16.5 s), 0 retries, 1 worker |
-| Python suite with real local Gateway | `.venv/bin/python -m pytest -q --run-local-gateway` | **PENDING — coordinator run** |
-| Phase 3 Chrome suite | `cd web && EUROPA_CHROME=… npm run test:browser` | **PENDING — coordinator run** |
+| Agent browser journeys (after the selector fix below) | `cd web && EUROPA_CHROME='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' npx playwright test -c playwright.agent.config.ts` | three sequential runs: **3 passed** (18.7 s), **3 passed** (16.2 s), **3 passed** (15.7 s); exit 0 each; 0 retries, 1 worker |
+| Python suite with real local Gateway (coordinator run, source `94b6886`) | `.venv/bin/python -m pytest -q --run-local-gateway` | **379 passed, 79 skipped**, exit 0 |
+| Phase 3 Chrome suite (coordinator runs, source `94b6886`) | `cd web && EUROPA_CHROME=… npm run test:browser` | run 1: **55 passed, 1 failed, 1 skipped**; run 2: **56 passed, 1 skipped**, exit 0 (see below) |
 
-Skips: the 105 skipped Python tests are opt-in integration tests marked
-"requires --run-local-gateway" or requiring `--run-containerd` (approved Linux
-infrastructure). Skipped tests are not counted as validation; the Gateway run above is
-pending.
+Skips: the 105 skipped tests in the plain Python run are opt-in integration tests
+("requires --run-local-gateway" or `--run-containerd`). In the Gateway run all 79 skips
+are containerd tests ("Linux required; macOS host has no containerd/runc/runsc/socket
+or identified Linux VM"). Skipped tests are not counted as validation.
+
+### Phase 3 Chrome suite failure (run 1)
+
+Run 1 failed `browser-dashboard-c/sessions.spec.ts:41`: the "Imported" session row was
+still "Starting", not "Idle", within 5 s. This failure is **not counted as a pass**.
+Discriminating check by the coordinator: the `sessions` project alone, three
+alternating warm runs each. Unmodified `main` `c5a8a60` failed 2 of 3 runs the same
+way; 4B failed 1 of 3. The failure is therefore a pre-existing intermittent timing
+failure in the Phase 3 sessions journey, not a 4B regression. The host had 238
+pre-existing `kernel_gateway` processes and a load average of about 4 during these runs.
+
+The Phase 3 suite overwrites the committed captures in `docs/screenshots/phase3h`;
+the coordinator restored them with `git checkout` after the runs.
+
+### Agent spec selector defect (review cycle 1)
+
+An independent run of the agent journeys gave 1 passed / 2 failed (create and denial,
+in `freshHome`). Cause: `panel(page).locator('summary')` in
+`web/browser-agent/home-coordinator.spec.ts` also matched the nested run-panel
+`<summary>` elements ("Completed · 0 actions") from the previous journey's Home thread,
+a Playwright strict-mode violation whenever that thread rendered before the assertion.
+The earlier passing runs had won that race. Fix (test-only; app code unchanged): the
+panel summary is selected with `:scope > summary`, and the run-panel summaries with
+`.home-thread details.agent-run > summary`, asserted as exactly one run in each fresh
+thread. The other locators were audited: they are unique (approval card list items,
+exact-name buttons, text-filtered `article.message`) or select deliberately
+(`.last()` on thread messages). No sleeps, timeouts or retries were added. After the fix:
+three sequential runs passed (above). After them there were no listeners on port
+18400, no `uvicorn` processes, and the `kernel_gateway` process list was identical to the
+238-process baseline. `docs/screenshots/phase3h` was unchanged; the phase4b captures were
+re-taken and still show the documented states.
 
 ## Backend coverage (PRD §10 cases 1–18)
 
@@ -133,4 +165,7 @@ and needs an owner decision.
 
 - Real OpenAI/OpenRouter providers were not exercised.
 - The demo provider's Journey B naming differs from the brief (`Revenue/revenue.ipynb`).
-- The pending Gateway and Phase 3 Chrome runs above are required before 4B is complete.
+- The Phase 3 sessions journey (`browser-dashboard-c/sessions.spec.ts:41`) is
+  intermittently failing on this host, including on unmodified `main`.
+- On mobile, the "Stop agent" explanation can sit below the fold of the scrollable
+  Home thread (`max-height: 46vh`) until the thread is scrolled.

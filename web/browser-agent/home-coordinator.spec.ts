@@ -9,6 +9,9 @@ const desktop = { width: 1360, height: 900 }, mobile = { width: 390, height: 844
 const panel = (page: Page) => page.locator('details.home-coordinator')
 const coordinator = (page: Page) => page.locator('.home-thread [data-author="coordinator"]')
 const owner = (page: Page) => page.locator('.home-thread [data-author="user"]')
+// Direct-child selectors: the panel's own <summary> must not match nested run-panel summaries.
+const panelSummary = (page: Page) => panel(page).locator(':scope > summary')
+const runSummaries = (page: Page) => panel(page).locator('.home-thread details.agent-run > summary')
 const fileRow = (page: Page, name: string) => page.locator('.dashboard-table .dashboard-filename', { hasText: name })
 
 async function capture(page: Page, name: string, size = desktop) {
@@ -36,7 +39,7 @@ async function rootNames(request: APIRequestContext) {
 async function freshHome(page: Page) {
   await page.goto('/')
   await expect(panel(page)).toBeVisible()
-  await expect(panel(page).locator('summary')).toContainText('Deterministic demo provider (not an LLM)')
+  await expect(panelSummary(page)).toContainText('Deterministic demo provider (not an LLM)')
   const created = page.waitForResponse(r => r.url().endsWith('/api/agent/home/conversations') && r.request().method() === 'POST')
   await panel(page).getByRole('button', { name: 'New', exact: true }).click()
   expect((await created).status()).toBe(201)
@@ -60,7 +63,7 @@ test('discussion only: reply with a question and nothing is created', async ({ p
   await expect(page.getByRole('tab', { name: 'Running', exact: true })).toBeVisible()
   await ask(page, 'How do inflation and housing prices relate?')
   await expect(coordinator(page).last()).toContainText('Would you like me to set up a notebook for this?')
-  await expect(panel(page).locator('details.agent-run summary')).toHaveText('Completed · 0 actions')
+  await expect(runSummaries(page)).toHaveText(['Completed · 0 actions'])  // fresh thread: exactly one run
   await expect(page.getByRole('region', { name: /^Approval:/ })).toHaveCount(0)
   expect(await rootNames(request)).toEqual(before)
   await capture(page, 'discussion')
@@ -91,7 +94,7 @@ test('create: Markov chain proposal, approval, Files refresh, open notebook, ret
   expect(await rootNames(request)).toContain('Markov Chain')
   const inside = await (await request.get('/api/workspace?path=Markov%20Chain')).json()
   expect((inside.items as { name: string }[]).map(item => item.name)).toEqual(['markov-chain.ipynb'])
-  await expect(panel(page).locator('details.agent-run').last().locator('summary')).toHaveText('Completed · 1 action')
+  await expect(runSummaries(page)).toHaveText(['Completed · 1 action'])
   await capture(page, 'created')
   await capture(page, 'created', mobile)
 
