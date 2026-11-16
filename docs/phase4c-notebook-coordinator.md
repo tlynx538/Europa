@@ -1,7 +1,7 @@
 # Phase 4C — Notebook Coordinator
 
 Status: implemented on `feature/phase4c-notebook-coordinator` (base `main` `ad0ca1a`, Phase
-4A harness and Phase 4B Home Coordinator merged). Validation evidence and pending runs are
+4A harness and Phase 4B Home Coordinator merged). Validation evidence is
 in [phase4c-validation.md](phase4c-validation.md). The owner brief and PRD are
 [agent-prompts/phase4c-notebook-coordinator.md](agent-prompts/phase4c-notebook-coordinator.md);
 harness contracts are in [phase4-harness-design.md](phase4-harness-design.md).
