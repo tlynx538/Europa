@@ -33,9 +33,11 @@ ROLES = {
         'home_coordinator', 'coordinator', frozenset({'read:workspace', 'propose:workspace'}),
         ('list_workspace', 'list_projects', 'list_notebooks', 'read_notebook_summary', 'create_project_notebook'),
         'workspace', Budget(model_calls=6, tool_calls=10)),
+    # Phase 4C: the Notebook Coordinator discusses and plans only. Delegation
+    # (delegate_task / 'delegate') stays disabled for this role until Phase 4D.
     'notebook_coordinator': Role(
-        'notebook_coordinator', 'coordinator', frozenset({'read:notebook', 'read:roadmap', 'propose:roadmap', 'delegate'}),
-        ('read_notebook', 'read_roadmap', 'read_execution', 'propose_roadmap', 'delegate_task'),
+        'notebook_coordinator', 'coordinator', frozenset({'read:notebook', 'read:roadmap', 'propose:roadmap'}),
+        ('read_notebook', 'read_roadmap', 'read_execution', 'propose_roadmap'),
         'notebook'),
     'coding_agent': Role(
         'coding_agent', 'coding_agent', frozenset({'read:notebook', 'edit:notebook', 'execute:notebook'}),

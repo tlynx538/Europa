@@ -171,10 +171,16 @@ def _project_for(ctx):
 
 
 def _notebook_roadmap(ctx, project):
+    """The roadmap a notebook role sees: the most recently created roadmap in the
+    notebook's current project whose notebook_id is this notebook. Roadmaps of other
+    notebooks in the same project (or project-level roadmaps) are never returned."""
     if project is None: return None
-    page = ctx.services.app.listing('roadmap', project=project, limit=100)
-    matching = [r for r in page['items'] if r['notebook_id'] == ctx.notebook_id]
-    return matching[-1] if matching else None
+    app, latest, cursor = ctx.services.app, None, 0
+    while cursor is not None:  # listing is ordered by creation sequence
+        page = app.listing('roadmap', project=project, notebook=ctx.notebook_id, after=cursor, limit=100)
+        latest = page['items'][-1] if page['items'] else latest
+        cursor = page['next_cursor']
+    return latest
 
 
 def roadmap_view(record):
