@@ -34,8 +34,8 @@ and the focused agent pytest trio were re-run (see the table).
 | Frontend unit tests (re-run after the CSS change) | `cd web && npm test` | **115 passed** in 21 files (baseline 107; +4 `AgentRunRoadmap.test.tsx`, +4 `WorkspaceAgent.test.tsx`); no existing test edited |
 | Type check and build (re-run after the CSS change) | `cd web && npm run build` | passed (`tsc --noEmit` and Vite build) |
 | Agent browser suite (source `5725454`) | `cd web && EUROPA_CHROME='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' npx playwright test -c playwright.agent.config.ts` | three consecutive runs: **6 passed** (25.1 s), **6 passed** (26.8 s), **6 passed** (23.6 s); 3 Phase 4B + 3 Phase 4C journeys; 1 worker, 0 retries |
-| Python suite with real local Gateway | `.venv/bin/python -m pytest -q --run-local-gateway` | **PENDING — coordinator run** |
-| Phase 3 Chrome suite | `cd web && EUROPA_CHROME=… npm run test:browser` | **PENDING — coordinator run** (known intermittent failure `browser-dashboard-c/sessions.spec.ts:41`, see Phase 4B validation; it counts as a failure, not a pass) |
+| Python suite with real local Gateway (coordinator, source `a6af17f`) | `.venv/bin/python -m pytest -q --run-local-gateway -rs` | **412 passed, 79 skipped**, exit 0 (386 + 26 Gateway tests). All 79 skips are containerd tests: "Linux required; macOS host has no containerd/runc/runsc/socket or identified Linux VM" |
+| Phase 3 Chrome suite (coordinator, source `a6af17f`) | `cd web && EUROPA_CHROME='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' npm run test:browser` | **56 passed, 1 skipped**, exit 0, on the first run (2.4 min). The known intermittent failure `browser-dashboard-c/sessions.spec.ts:41` (see Phase 4B validation) did not occur; no leftover `kernel_gateway` processes were running before or after the run. The suite rewrote committed `docs/screenshots/phase3h/` captures, which were restored with `git checkout` |
 
 Skips: the 105 skipped tests in the plain Python run are opt-in integration tests
 ("requires --run-local-gateway" or `--run-containerd`). Skipped tests are not counted as
