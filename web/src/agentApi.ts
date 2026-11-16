@@ -4,10 +4,27 @@ import type { Message, RecordData } from './applicationApi'
 export type RunState = 'queued' | 'running' | 'waiting_for_approval' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
 export interface AgentStatus { enabled: boolean; provider: string | null; model: string | null; reason: string | null }
 export interface ApprovalPreview { title?: string; actions?: string[]; purpose?: string; [key: string]: unknown }
+/** Roadmap preview fields from propose_roadmap. Values arrive as untrusted JSON; render them only through roadmapPreview(). */
+export interface RoadmapPreviewTask { title: string; depends_on: string[]; acceptance_criteria: string[]; status: string | null }
+export interface RoadmapPreview { objective: string | null; rationale: string | null; tasks: RoadmapPreviewTask[]; removed: string[]; revision: number | null }
+const text = (value: unknown) => typeof value === 'string' && value.trim() ? value : null
+const texts = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+/** Validated roadmap preview, or null when the preview is not a roadmap. Unknown fields are ignored. */
+export function roadmapPreview(preview: ApprovalPreview): RoadmapPreview | null {
+  if (!Array.isArray(preview.tasks)) return null
+  const tasks = preview.tasks.flatMap(task => {
+    if (!task || typeof task !== 'object') return []
+    const item = task as Record<string, unknown>
+    const title = text(item.title)
+    return title ? [{ title, depends_on: texts(item.depends_on), acceptance_criteria: texts(item.acceptance_criteria), status: text(item.status) }] : []
+  })
+  const revision = typeof preview.roadmap_revision === 'number' && Number.isInteger(preview.roadmap_revision) ? preview.roadmap_revision : null
+  return { objective: text(preview.objective), rationale: text(preview.rationale), tasks, removed: texts(preview.removed_task_ids), revision }
+}
 export interface ApprovalView { id: string; tool: string; state: 'pending' | 'approved' | 'denied' | 'expired' | 'invalidated'; digest: string; preview: ApprovalPreview; expires_at: number; created_at?: number; decided_at?: number | null }
 export interface ToolCallView { id: string; name: string; state: string; summary: string | null; status: string | null; links: Record<string, string | number | null> | null; data: { notebook_id?: string; notebook_path?: string; project_id?: string; [key: string]: unknown } | null }
 export interface RunView {
-  id: string; role: string; state: RunState; conversation_id: string; trigger_message_id: string | null
+  id: string; role: string; state: RunState; conversation_id: string; trigger_message_id: string | null; parent_run_id?: string | null
   notebook_id: string | null; project_id: string | null; provider: string; model: string; error: string | null
   result: { message_id?: string; links?: Record<string, string> } | null; created_at: number; updated_at: number; finished_at: number | null
   approvals: ApprovalView[]; tool_calls: ToolCallView[]
