@@ -320,8 +320,14 @@ async def reconcile_create(ctx, args, binding, _partial):
 
 # --------------------------------------------------------------------------- Notebook Coordinator
 
+NEW_KEY_MAX = 40  # '<8-char prefix>-<key>' stays within the 64-character task-ID limit
+
+
 class PlanTask(Args):
-    key: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,40}$', description='Short key; reuse an existing task_id to keep it')
+    # Up to 64 characters so any existing task ID (the task-ID pattern) can be reused
+    # as a key; bind_roadmap limits keys of *new* tasks to NEW_KEY_MAX characters.
+    key: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,64}$',
+                     description='Short key (at most 40 characters) for a new task; reuse an existing task_id to keep that task')
     title: str = Field(min_length=1, max_length=200)
     acceptance_criteria: list[str] = Field(min_length=1, max_length=8)
     depends_on: list[str] = Field(default_factory=list, max_length=16)
@@ -343,7 +349,14 @@ async def bind_roadmap(ctx, args):
         keys = [t.key for t in args.tasks]
         if len(set(keys)) != len(keys): raise ToolError('Duplicate task keys')
         prefix = (ctx.call_id or 'plan')[:8]
-        ids = {t.key: (t.key if t.key in existing else f'{prefix}-{t.key}')[:64] for t in args.tasks}
+        long_keys = [t.key for t in args.tasks if t.key not in existing and len(t.key) > NEW_KEY_MAX]
+        if long_keys:
+            raise ToolError(f'New task keys must be at most {NEW_KEY_MAX} characters (reuse an existing task_id to keep a task): '
+                            + ', '.join(long_keys), 'invalid')
+        ids = {t.key: t.key if t.key in existing else f'{prefix}-{t.key}' for t in args.tasks}
+        # A new task's generated ID must not equal another task's ID, including an existing task left out of this plan.
+        if len(set(ids.values())) != len(ids) or any(k not in existing and v in existing for k, v in ids.items()):
+            raise ToolError('Task keys produce duplicate task IDs; choose different keys', 'invalid')
         tasks = []
         for t in args.tasks:
             if any(d not in ids for d in t.depends_on): raise ToolError(f'Task {t.key} depends on an unknown key')

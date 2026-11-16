@@ -482,3 +482,83 @@ async def test_demo_standalone_refuses_planning_but_discusses(make):
     await h.settle(run['id'])
     assert h.messages(conversation)[-1]['data']['content'] == \
         'This notebook is not in a project, so it has no roadmap. Planning needs a project.'
+
+
+# ------------------------------------------------------------------ regressions: long task keys, notebook context trimming
+
+async def test_agent_created_task_with_long_key_is_kept_in_a_later_revision(make):
+    long_key = 'k' * 40
+    h = await make([propose([{'key': long_key, 'title': 'Long task', 'acceptance_criteria': ['x']}]), reply('Saved.')])
+    nid, project, conversation = h.project_notebook()
+    run = await h.ask(conversation, 'Plan it')
+    await h.settle(run['id'])
+    await h.approve(run['id'])
+    await h.settle(run['id'], states=('completed',))
+    (roadmap,) = roadmaps(h, project)
+    (task,) = roadmap['data']['tasks']
+    assert len(task['id']) == 49 and task['id'].endswith('-' + long_key)
+    h.application.roadmap_update(roadmap['id'], m.TaskUpdate(operation_id=op(), revision=roadmap['revision'], task=m.Task(
+        **{**{k: task[k] for k in m.Task.model_fields}, 'status': 'in_progress', 'explanation': 'Halfway'})), True)
+    h.provider.script = [
+        propose([{'key': 'n' * 41, 'title': 'Too long', 'acceptance_criteria': ['x']},
+                 {'key': task['id'], 'title': 'Long task', 'acceptance_criteria': ['x']}]),
+        propose([{'key': task['id'], 'title': 'Long task renamed', 'acceptance_criteria': ['x']},
+                 {'key': 'next', 'title': 'Next', 'acceptance_criteria': ['y'], 'depends_on': [task['id']]}]),
+        reply('Revised.')]
+    run = await h.ask(conversation, 'Add a step')
+    assert (await h.settle(run['id']))['state'] == 'waiting_for_approval'
+    rejected = h.runtime.store.tool_calls(run['id'])[0]
+    assert rejected['state'] == 'rejected' and rejected['result']['status'] == 'invalid'
+    assert 'at most 40 characters' in rejected['result']['summary']
+    preview = h.pending_approval(run['id'])['preview']
+    assert preview['removed_task_ids'] == [] and preview['tasks'][0]['status'] == 'in_progress'
+    await h.approve(run['id'])
+    await h.settle(run['id'], states=('completed',))
+    (revised,) = roadmaps(h, project)
+    kept, added = revised['data']['tasks']
+    assert kept['id'] == task['id'] and kept['title'] == 'Long task renamed'
+    assert kept['status'] == 'in_progress' and kept['explanation'] == 'Halfway'
+    assert added['dependencies'] == [task['id']] and len(added['id']) <= 64
+
+
+async def test_generated_task_id_cannot_collide_with_an_existing_task(make):
+    from agents.tools import REGISTRY, ProposeRoadmapArgs, ToolContext, ToolError
+    h = await make([])
+    nid, project, conversation = h.project_notebook()
+    owner_roadmap(h, project, nid, [{'id': 'abcdefgh-x', 'title': 'Owner task', 'acceptance_criteria': ['x']}])
+    run = {'id': 'r', 'role': 'notebook_coordinator', 'notebook_id': nid, 'conversation_id': conversation}
+    ctx = ToolContext(run=run, services=h.runtime.services, call_id='abcdefgh' + '0' * 24)
+    args = ProposeRoadmapArgs.model_validate({'objective': 'o', 'tasks': [{'key': 'x', 'title': 'New', 'acceptance_criteria': ['y']}]})
+    with pytest.raises(ToolError) as error:
+        await REGISTRY['propose_roadmap'].bind(ctx, args)
+    assert error.value.kind == 'invalid'
+    kept = ProposeRoadmapArgs.model_validate({'objective': 'o', 'tasks': [
+        {'key': 'abcdefgh-x', 'title': 'Owner task', 'acceptance_criteria': ['x']}, {'key': 'y', 'title': 'New', 'acceptance_criteria': ['y']}]})
+    binding = await REGISTRY['propose_roadmap'].bind(ctx, kept)
+    assert [t['id'] for t in binding['tasks']] == ['abcdefgh-x', 'abcdefgh-y'] and binding['removed'] == []
+
+
+async def test_notebook_context_drops_oldest_cells_and_keeps_the_newest(make):
+    h = await make([reply('ok')])
+    cells = [f'# cell {i:02d}\n' + chr(65 + i % 26) * 1490 for i in range(29)] + ['newest_cell = "last"']
+    nid, project, conversation = h.project_notebook(cells=cells)
+    revision = h.notebooks.open(nid)['metadata']['europa']['revision']
+    run = await h.ask(conversation, 'Summarize')
+    await h.settle(run['id'])
+    _, user = context_of(h)
+    body = user.split(f'<untrusted source="notebook:{nid}@{revision}">\n', 1)[1].split('\n</untrusted>', 1)[0]
+    view = json.loads(body)  # fits without the generic clip marker
+    assert len(body) <= 12000 and view['cell_count'] == 30
+    assert view['cells'][-1]['source'] == 'newest_cell = "last"'
+    assert view['omitted_leading_cells'] == view['cell_count'] - len(view['cells']) == view['cells'][0]['index'] > 1
+    assert [c['index'] for c in view['cells']] == list(range(view['omitted_leading_cells'], 30))
+
+
+def test_fit_notebook_keeps_a_single_oversized_newest_cell_with_explicit_clip():
+    from agents.context import fence, fit_notebook
+    view = {'notebook_id': 'n', 'title': 't', 'revision': 3, 'cell_count': 2, 'omitted_leading_cells': 0,
+            'cells': [{'index': 0, 'source': 'old'}, {'index': 1, 'source': 'x' * 3000}]}
+    text = fit_notebook(view, 1000)
+    assert json.loads(text)['cells'] == [{'index': 1, 'source': 'x' * 3000}] and json.loads(text)['omitted_leading_cells'] == 1
+    assert view['omitted_leading_cells'] == 0 and len(view['cells']) == 2  # input unchanged
+    assert 'more characters omitted]' in fence('notebook:n@3', text, 1000)

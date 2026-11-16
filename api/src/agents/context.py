@@ -38,6 +38,24 @@ def fence(label, payload, limit):
     return f'<untrusted source="{label}">\n{clip(text, limit)}\n</untrusted>'
 
 
+def _dump(payload):
+    return json.dumps(payload, ensure_ascii=False, indent=1, default=str)
+
+
+def fit_notebook(view, limit):
+    """Serialize a notebook view within `limit` characters by dropping the oldest
+    shown cells first, keeping `omitted_leading_cells` accurate. The newest cell is
+    always kept (its own source/output limits apply); only if it alone still exceeds
+    the limit does the generic explicit clip marker apply."""
+    view = {**view, 'cells': list(view['cells'])}
+    text = _dump(view)
+    while len(text) > limit and len(view['cells']) > 1:
+        view['cells'].pop(0)
+        view['omitted_leading_cells'] = view['cell_count'] - len(view['cells'])
+        text = _dump(view)
+    return text
+
+
 def _messages(app, conversation, limit=12, chars=1000):
     page = app.listing('message', parent=conversation, limit=100)
     items = page['items']
@@ -63,7 +81,7 @@ def assemble(services, run, trigger_text, *, budget_chars):
     else:
         document = services.notebooks.open(run['notebook_id'])
         sections.append(fence(f"notebook:{run['notebook_id']}@{document['metadata']['europa']['revision']}",
-                              notebook_view(document, cells=30, source_limit=1500, output_limit=500), 12000))
+                              fit_notebook(notebook_view(document, cells=30, source_limit=1500, output_limit=500), 12000), 12000))
         provenance.append(f"notebook:{run['notebook_id']}@{document['metadata']['europa']['revision']}")
         from agents.tools import ToolContext, _notebook_roadmap, _project_for
         ctx = ToolContext(run=run, services=services)
