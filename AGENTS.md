@@ -71,6 +71,7 @@ when planning engine work; it does not authorize starting that milestone.
 For the Phase 4B Home Coordinator, read
 [its design](docs/phase4b-home-coordinator.md) and
 [validation report](docs/phase4b-validation.md).
+For the Phase 4C Notebook Coordinator and `GET /health`, read [its design](docs/phase4c-notebook-coordinator.md) and [validation report](docs/phase4c-validation.md).
 
 - On this development machine, use one OpenCode worker and one heavy validation
   job at a time. Do not recursively spawn agents or run duplicate browser suites.
