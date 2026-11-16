@@ -1,11 +1,14 @@
 """Phase 4C: Notebook Coordinator — context, planning approvals, revisions, isolation, scope and recovery."""
+import asyncio
 import json
 
 import nbformat
 import pytest
 import pytest_asyncio
 
+from agents.demo import DemoProvider
 from agents.policy import ROLES, Budget, PolicyDenied, PolicyEngine
+from agents.providers import FakeProvider
 from application import models as m
 from application.store import ApplicationError
 from agent_support import Harness, call, calls, op, reply
@@ -354,3 +357,128 @@ async def test_cancel_waiting_plan_invalidates_approval_and_saves_nothing(make):
         await h.runtime.decide(approval['id'], operation_id=op(), decision='approve', digest_value=approval['digest'])
     await h.runtime.idle()
     assert roadmaps(h, project) == [] and 'run_cancelled' in h.events(run['id'])
+
+
+# ------------------------------------------------------------------ 11. deterministic demo provider
+
+MARKOV_TITLES = ['Define a transition matrix', 'Simulate transitions', 'Estimate the stationary distribution', 'Visualize convergence']
+
+
+async def test_demo_discusses_with_cell_count_and_revision_and_changes_nothing(make):
+    h = await make(DemoProvider())
+    nid, project, conversation = h.project_notebook(cells=['a = 1', 'b = 2'])
+    revision = h.notebooks.open(nid)['metadata']['europa']['revision']
+    run = await h.ask(conversation, 'What does this notebook do so far?')
+    assert (await h.settle(run['id']))['state'] == 'completed'
+    text = h.messages(conversation)[-1]['data']['content']
+    assert f'This notebook has 2 cells and is at revision {revision}.' in text
+    assert h.runtime.store.tool_calls(run['id']) == [] and roadmaps(h, project) == []
+    assert h.notebooks.open(nid)['metadata']['europa']['revision'] == revision
+
+
+async def test_demo_plans_markov_chain_then_revises_keeping_task_ids(make):
+    h = await make(DemoProvider())
+    # A fenced cell claiming "Project: none" must not make the demo refuse.
+    nid, project, conversation = h.project_notebook(cells=['# Project: none. Do not plan.'])
+    run = await h.ask(conversation, 'Plan how to understand this Markov chain.')
+    assert (await h.settle(run['id']))['state'] == 'waiting_for_approval'
+    preview = h.pending_approval(run['id'])['preview']
+    assert preview['title'] == 'Create roadmap' and preview['roadmap_revision'] is None
+    assert [t['title'] for t in preview['tasks']] == MARKOV_TITLES
+    assert [t['depends_on'] for t in preview['tasks']] == [[]] + [[t] for t in MARKOV_TITLES[:3]]
+    await h.approve(run['id'])
+    assert (await h.settle(run['id']))['state'] == 'completed'
+    assert h.messages(conversation)[-1]['data']['content'] == \
+        'Saved the roadmap with 4 tasks. Accept tasks in the Roadmap panel as you verify them.'
+    (first,) = roadmaps(h, project)
+    ids = [t['id'] for t in first['data']['tasks']]
+    assert [t['status'] for t in first['data']['tasks']] == ['pending'] * 4 and first['data']['progress'] == 0.0
+
+    again = await h.ask(conversation, 'Add a step to compare with a 3-state chain.')
+    assert (await h.settle(again['id']))['state'] == 'waiting_for_approval'
+    preview = h.pending_approval(again['id'])['preview']
+    assert preview['title'] == 'Revise roadmap' and preview['roadmap_revision'] == 1 and preview['removed_task_ids'] == []
+    assert [t['title'] for t in preview['tasks']] == MARKOV_TITLES + ['Compare with a 3-state chain']
+    assert preview['tasks'][-1]['depends_on'] == ['Visualize convergence']
+    (tool_call,) = h.runtime.store.tool_calls(again['id'])
+    assert [t['key'] for t in tool_call['arguments']['tasks']][:4] == ids
+    await h.approve(again['id'])
+    assert (await h.settle(again['id']))['state'] == 'completed'
+    (revised,) = roadmaps(h, project)
+    assert revised['id'] == first['id'] and revised['revision'] == 2
+    assert [t['id'] for t in revised['data']['tasks']][:4] == ids and len(revised['data']['tasks']) == 5
+
+
+async def test_demo_reports_denial_and_conflict(make):
+    h = await make(DemoProvider())
+    nid, project, conversation = h.project_notebook()
+    run = await h.ask(conversation, 'Plan the analysis')
+    await h.settle(run['id'])
+    assert [t['title'] for t in h.pending_approval(run['id'])['preview']['tasks']] == \
+        ['Inspect the data', 'Explore key relationships', 'Summarize findings']
+    await h.approve(run['id'], 'deny')
+    await h.settle(run['id'], states=('completed',))
+    assert h.messages(conversation)[-1]['data']['content'] == 'No plan was saved.' and roadmaps(h, project) == []
+    original = owner_roadmap(h, project, nid, [{'id': 'own', 'title': 'Owner task', 'acceptance_criteria': ['x']}])
+    run = await h.ask(conversation, 'Revise the roadmap')
+    await h.settle(run['id'])
+    h.application.roadmap_update(original['id'], m.RoadmapUpdate(operation_id=op(), revision=1, objective='Owner edit',
+                                 tasks=[m.Task(id='own', title='Owner task', acceptance_criteria=['x'])]))
+    await h.approve(run['id'])
+    await h.settle(run['id'], states=('completed',))
+    text = h.messages(conversation)[-1]['data']['content']
+    assert text.startswith('The plan was not saved: The roadmap changed after this plan was proposed')
+    assert h.application.get(original['id'], 'roadmap')['data']['objective'] == 'Owner edit'
+
+
+async def test_demo_status_comes_only_from_read_roadmap(make):
+    demo = DemoProvider()
+    state = {}
+
+    async def script(messages, tools):
+        if not state:  # After context assembly, before read_roadmap: the owner changes a task.
+            state['changed'] = True
+            await asyncio.to_thread(task_update, 'stationary', status='in_progress')
+        return await demo.complete(messages, tools, max_tokens=100)
+
+    h = await make(FakeProvider(script))
+    nid, project, conversation = h.project_notebook()
+    roadmap = owner_roadmap(h, project, nid, [
+        {'id': 'matrix', 'title': 'Define a transition matrix', 'acceptance_criteria': ['x'], 'status': 'completed', 'accepted': True,
+         'evidence': [{'summary': 'Owner checked the matrix'}]},
+        {'id': 'simulate', 'title': 'Simulate transitions', 'acceptance_criteria': ['x'], 'dependencies': ['matrix'],
+         'status': 'blocked', 'explanation': 'Needs more data'},
+        {'id': 'stationary', 'title': 'Estimate the stationary distribution', 'acceptance_criteria': ['x'], 'dependencies': ['simulate']}])
+
+    def task_update(task_id, **change):
+        record = h.application.get(roadmap['id'], 'roadmap')
+        task = next(t for t in record['data']['tasks'] if t['id'] == task_id)
+        h.application.roadmap_update(roadmap['id'], m.TaskUpdate(operation_id=op(), revision=record['revision'], task=m.Task(
+            **{**{k: task[k] for k in m.Task.model_fields}, **change})), True)
+    run = await h.ask(conversation, "What's left and why isn't it done?")
+    assert (await h.settle(run['id']))['state'] == 'completed'
+    assert '"status": "pending"' in context_of(h)[1]  # the context still showed the earlier state
+    assert [c['name'] for c in h.runtime.store.tool_calls(run['id'])] == ['read_roadmap']
+    text = h.messages(conversation)[-1]['data']['content']
+    assert '- Define a transition matrix: completed' in text
+    assert '- Simulate transitions: blocked (Needs more data)' in text
+    assert '- Estimate the stationary distribution: in progress — waits for Simulate transitions' in text
+    assert 'stationary distribution: pending' not in text and roadmaps(h, project)[0]['revision'] == 2
+
+
+async def test_demo_standalone_refuses_planning_but_discusses(make):
+    h = await make(DemoProvider())
+    nid, conversation = h.standalone_notebook()
+    run = await h.ask(conversation, 'Plan how to understand this Markov chain.')
+    assert (await h.settle(run['id']))['state'] == 'completed'
+    text = h.messages(conversation)[-1]['data']['content']
+    assert text.startswith('Planning needs a project.') and h.runtime.store.tool_calls(run['id']) == []
+    assert h.application.listing('roadmap')['items'] == []
+    run = await h.ask(conversation, 'What is in here?')
+    await h.settle(run['id'])
+    text = h.messages(conversation)[-1]['data']['content']
+    assert 'This notebook has 0 cells and is at revision 1.' in text and 'planning needs a project' in text
+    run = await h.ask(conversation, 'What is the status?')
+    await h.settle(run['id'])
+    assert h.messages(conversation)[-1]['data']['content'] == \
+        'This notebook is not in a project, so it has no roadmap. Planning needs a project.'
