@@ -251,6 +251,10 @@ Major API groups:
 - `/api/kernel` — low-level Gateway-compatible kernel operations
 - `/api/agent` — agent status, Home conversation, runs, events, cancellation and approvals
   (503 unless an agent provider is configured, except `/api/agent/status`)
+- `GET /health` (top level, also `HEAD`) — side-effect-free liveness: 200 with
+  `{"status":"ok","api":"ok","gateway":"stopped|starting|running|stopping|failed|unreachable","agents":"running|disabled"}`;
+  503 with `"unavailable": [...]` naming the failing application or notebook storage. It never starts or
+  attaches a Gateway (unlike `GET /api/health`, which provisions the default runtime).
 
 See [notebook persistence](docs/notebook-persistence.md) and
 [conversational notebooks](docs/conversational-notebooks.md) for detailed API
