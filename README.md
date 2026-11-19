@@ -233,6 +233,18 @@ never stored. Schema v7 is forward-only: back up `application.sqlite3` before
 upgrading existing data. See [Home Coordinator](docs/phase4b-home-coordinator.md) and
 [Phase 4B validation](docs/phase4b-validation.md).
 
+## Notebook Coordinator (Phase 4C)
+
+With agents enabled, an "Ask Coordinator" checkbox appears above the message composer in an
+open notebook. Owner messages then also start a Notebook Coordinator run in the notebook's
+existing conversation. It reads this notebook, its project and its roadmap, discusses them,
+and can propose or revise the notebook's roadmap. Nothing is saved without an approval bound
+to the exact plan and roadmap revision, and a roadmap edited meanwhile is a conflict, never
+an overwrite. It cannot assign work, edit cells, run code or read other notebooks until
+Phase 4D, and task completion stays an owner action. See
+[Notebook Coordinator](docs/phase4c-notebook-coordinator.md) and
+[Phase 4C validation](docs/phase4c-validation.md).
+
 ## API overview
 
 OpenAPI and Swagger documentation are available while Europa is running:
@@ -251,6 +263,10 @@ Major API groups:
 - `/api/kernel` — low-level Gateway-compatible kernel operations
 - `/api/agent` — agent status, Home conversation, runs, events, cancellation and approvals
   (503 unless an agent provider is configured, except `/api/agent/status`)
+- `GET /health` (top level, also `HEAD`) — side-effect-free liveness: 200 with
+  `{"status":"ok","api":"ok","gateway":"stopped|starting|running|stopping|failed|unreachable","agents":"running|disabled"}`;
+  503 with `"unavailable": [...]` naming the failing application or notebook storage. It never starts or
+  attaches a Gateway (unlike `GET /api/health`, which provisions the default runtime).
 
 See [notebook persistence](docs/notebook-persistence.md) and
 [conversational notebooks](docs/conversational-notebooks.md) for detailed API
@@ -298,7 +314,7 @@ cd web
 npm run test:browser
 ```
 
-The Home Coordinator journeys use a separate config with the demo provider on port 18400:
+The Home and Notebook Coordinator journeys use a separate config with the demo provider on port 18400:
 
 ```sh
 cd web
@@ -317,6 +333,8 @@ Containerd tests require approved Linux infrastructure and explicit
 - [Phase 3G notebook UX validation](docs/phase3g-validation.md)
 - [Phase 4B Home Coordinator](docs/phase4b-home-coordinator.md) and
   [validation](docs/phase4b-validation.md)
+- [Phase 4C Notebook Coordinator](docs/phase4c-notebook-coordinator.md) and
+  [validation](docs/phase4c-validation.md)
 - [Notebook persistence](docs/notebook-persistence.md)
 - [Projects and conversations](docs/conversational-notebooks.md)
 - [Runtime architecture](docs/runtime-provider.md)

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { HeaderSlot, SidePanel, usePanels } from './Layout'
 import { TaskEditor } from './TaskEditor'
 import { all, change, pendingMutation, retryMutation, rawTask, type RecordData, type Project, type Roadmap, type Conversation, type Message, type Comment, type Activity, type Task } from './applicationApi'
@@ -7,6 +7,11 @@ import type { Navigate } from './Navigation'
 import { projectConversation } from './conversationProjection'
 import { ConversationComposer, clearSentDraft, type CellReference } from './ConversationComposer'
 import { InlineCommentComposer, clearSentCommentDraft } from './InlineCommentComposer'
+import { agentStatus, pendingAgent, retryAgent, scopes, startRun, unknownOutcome, type RunView } from './agentApi'
+import { AgentRunPanel, useAgentRuns } from './AgentRun'
+
+const askKey = 'europa.agent.ask'
+const UNKNOWN_START = 'Starting the Coordinator has an unknown outcome.'
 
 type Canvas = { beforeCells: ReactNode; afterCell: (id: string) => ReactNode; history: ReactNode; composer: ReactNode; discussCell: (id: string) => void }
 type Props = { notebookId?: string; cells: { id: string; source?: string }[]; draftCells?: string[]; conflict?: boolean; selectedCell?: string; showActivity: boolean; revision?: number; navigate: Navigate; onOpenNotebook: (id: string, cell?: string) => Promise<boolean>; onCommentCounts: (counts: Record<string, number>) => void; renderNotebook?: (view: Canvas) => ReactNode }
@@ -160,6 +165,46 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
     if (!notebook || !await onOpenNotebook(notebook, cell ?? undefined)) return
     if (panels.mobile) { panels.setLeft(false); panels.setRight(false) }
   }
+  // ---------------------------------------------------------------- Notebook Coordinator (additive; nothing renders when agents are disabled)
+  const [agentEnabled, setAgentEnabled] = useState(false)
+  useEffect(() => {
+    let alive = true
+    agentStatus().then(status => { if (alive) setAgentEnabled(status.enabled === true) }).catch(() => { /* unavailable: agents stay disabled */ })
+    return () => { alive = false }
+  }, [])
+  const [askCoordinator, setAskCoordinator] = useState(() => localStorage.getItem(askKey) !== '0')
+  const [runUnknown, setRunUnknown] = useState(false), [runError, setRunError] = useState(''), [runBusy, setRunBusy] = useState(false)
+  const conversationId = conversation?.id
+  const currentConversation = useRef(conversationId); currentConversation.current = conversationId
+  const currentProject = useRef(project?.id); currentProject.current = project?.id
+  useEffect(() => { setRunError(''); setRunUnknown(!!conversationId && !!pendingAgent(scopes.run(conversationId))) }, [conversationId])
+  const onRunsChanged = useCallback((_runs: RunView[], previous: RunView[] | null) => {
+    if (previous === null) return  // first load: messages and roadmap are already loading
+    const id = currentConversation.current
+    if (id) void all<Message>(`/conversations/${id}/messages`).then(m => { if (currentConversation.current === id) { setMessages(m); setMessagesLoaded(true) } })
+      .catch(e => setRunError(`Could not refresh the conversation: ${String(e)}`))
+    if (currentProject.current) void loadProject(currentProject.current).catch(e => setError(String(e)))
+  }, [loadProject])
+  const { runs, error: runsError, refresh: refreshRuns } = useAgentRuns(conversationId, agentEnabled, onRunsChanged)
+  const startFailed = (e: unknown) => {
+    if (unknownOutcome(e)) { setRunUnknown(true); setRunError('') }
+    else { setRunUnknown(false); setRunError(`The Coordinator could not start: ${e instanceof Error ? e.message : String(e)}`) }
+  }
+  const beginRun = async (conversation: string, message: string) => {
+    setRunBusy(true); setRunError('')
+    try { await startRun(conversation, message); setRunUnknown(false); refreshRuns() } catch (e) { startFailed(e) } finally { setRunBusy(false) }
+  }
+  const retryRun = async () => {
+    if (!conversationId || runBusy) return
+    setRunBusy(true); setRunError('')
+    try { await retryAgent<RunView>(scopes.run(conversationId)); setRunUnknown(false); refreshRuns() } catch (e) { startFailed(e) } finally { setRunBusy(false) }
+  }
+  const runPanels = (message: RecordData<Message>) => {
+    if (message.data.author_role !== 'user') return null
+    const own = runs.filter(r => r.trigger_message_id === message.id && !r.parent_run_id)
+    return own.length > 0 && <div className="agent-stream">{own.map(r => <AgentRunPanel key={r.id} run={r} onChanged={refreshRuns}
+      onRevealCell={cell => void jump(notebookId, cell)} children={runs.filter(child => child.parent_run_id === r.id)} />)}</div>
+  }
   const retryPending = async () => {
     const operation = pendingMutation()
     const linkedNotebook = (operation?.body as { notebook_id?: string } | undefined)?.notebook_id
@@ -175,7 +220,8 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
     await refresh()
   }
   const projection = projectConversation(notebookId ?? '', project?.id ?? '', cells.map(c => c.id), conversation ?? undefined, messages, member ? comments : [])
-  const messageView = (m: RecordData<Message>, scope?: string) => <article data-author={m.data.author_role} className={`message ${m.data.parent_id ? 'reply' : ''}`} id={`message-${m.id}`} key={m.id}><div className="message-meta"><strong>{m.data.author_role}{m.data.state === 'needs_input' ? ' · Needs input' : ''}</strong><time dateTime={new Date(m.created_at * 1000).toISOString()} title={new Date(m.created_at * 1000).toLocaleString()}>{new Date(m.created_at * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></div>{scope && <small>{scope}</small>}{m.data.cell_id && <small>{cellLabel(m.data.cell_id)} reference{!cells.some(c => c.id === m.data.cell_id) ? ' · historical missing cell' : ''}</small>}{m.data.parent_id && <a href={`#message-${m.data.parent_id}`}>In reply to message</a>}<p>{m.data.content}</p><button onClick={() => setReply(m.id)}>Reply to message</button></article>
+  const messageView = (m: RecordData<Message>, scope?: string) => <Fragment key={m.id}>{messageArticle(m, scope)}{runPanels(m)}</Fragment>
+  const messageArticle = (m: RecordData<Message>, scope?: string) => <article data-author={m.data.author_role} className={`message ${m.data.parent_id ? 'reply' : ''}`} id={`message-${m.id}`} key={m.id}><div className="message-meta"><strong>{m.data.author_role}{m.data.state === 'needs_input' ? ' · Needs input' : ''}</strong><time dateTime={new Date(m.created_at * 1000).toISOString()} title={new Date(m.created_at * 1000).toLocaleString()}>{new Date(m.created_at * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></div>{scope && <small>{scope}</small>}{m.data.cell_id && <small>{cellLabel(m.data.cell_id)} reference{!cells.some(c => c.id === m.data.cell_id) ? ' · historical missing cell' : ''}</small>}{m.data.parent_id && <a href={`#message-${m.data.parent_id}`}>In reply to message</a>}<p>{m.data.content}</p><button onClick={() => setReply(m.id)}>Reply to message</button></article>
   const commentMeta = (record: RecordData<Comment>) => <div className="message-meta"><strong>{record.data.author_role}</strong><time dateTime={new Date(record.created_at * 1000).toISOString()} title={new Date(record.created_at * 1000).toLocaleString()}>{new Date(record.created_at * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></div>
   const commentView = (root: RecordData<Comment>) => <article className="message cell-comment" tabIndex={-1} data-comment-cell={root.data.cell_id} key={root.id}>
     <div className="comment-anchor"><button disabled={root.data.anchor_status === 'orphaned' || !cells.some(c => c.id === root.data.cell_id)} onClick={() => void jump(notebookId, root.data.cell_id)}>{cellLabel(root.data.cell_id)} · <span className={`badge ${root.data.anchor_status}`}>{root.data.anchor_status === 'orphaned' ? 'Missing cell' : root.data.anchor_status}</span></button>{commentMeta(root)}</div><p>{root.data.content}</p>
@@ -200,7 +246,10 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
       {error && <p role="alert" className="alert">{error}</p>}{pending && <div className="alert"><p>An operation has an unknown outcome. Retry the identical operation safely; no new operation ID will be created.</p><button disabled={busy || retryWaiting} onClick={() => void run(retryPending, pendingMutation()?.path !== `/conversations/${conversation?.id}/messages`)}>Retry pending operation</button></div>}
     </section>,
     composer: notebookId ? <div className="composer-shell" ref={composerShell}>{!conversation && <div className="composer-status" role={canonicalError ? 'alert' : 'status'}>{canonicalError ? <>Conversation unavailable. <button onClick={retryCanonical}>Retry conversation</button></> : 'Loading conversation…'}</div>}
-      {conversation && <ConversationComposer key={`${notebookId}.${conversation.id}`} notebookId={notebookId} conversationId={conversation.id} cells={cells.map(c => ({ id: c.id, source: c.source ?? '' }))} drafts={draftCells} conflict={conflict} revision={revision} selectedCell={selectedCell} reference={reference?.notebook === notebookId && reference.conversation === conversation.id ? reference : null} reply={reply} onReplyConsumed={() => setReply(null)} onReferenceRemoved={() => setReference(null)} busy={busy || !messagesLoaded || !!canonicalError} pending={pending} onSend={async (body, content) => { let sent = false; await run(async () => { await change(`/conversations/${conversation.id}/messages`, 'POST', body); sent = true; clearSentDraft(notebookId, conversation.id, content); setMessages(await all<Message>(`/conversations/${conversation.id}/messages`)) }, false); return sent }} />}</div> : null,
+      {conversation && agentEnabled && <label className="agent-ask"><input type="checkbox" checked={askCoordinator} onChange={event => { setAskCoordinator(event.target.checked); localStorage.setItem(askKey, event.target.checked ? '1' : '0') }} />Ask Coordinator</label>}
+      {conversation && agentEnabled && runUnknown && <p role="alert" className="agent-warning agent-stream-alert">{UNKNOWN_START} <button type="button" disabled={runBusy} onClick={() => void retryRun()}>Retry</button></p>}
+      {conversation && agentEnabled && (runError || runsError) && <p role="alert" className="agent-error agent-stream-alert">{runError || runsError}</p>}
+      {conversation && <ConversationComposer key={`${notebookId}.${conversation.id}`} notebookId={notebookId} conversationId={conversation.id} cells={cells.map(c => ({ id: c.id, source: c.source ?? '' }))} drafts={draftCells} conflict={conflict} revision={revision} selectedCell={selectedCell} reference={reference?.notebook === notebookId && reference.conversation === conversation.id ? reference : null} reply={reply} onReplyConsumed={() => setReply(null)} onReferenceRemoved={() => setReference(null)} busy={busy || !messagesLoaded || !!canonicalError} pending={pending} onSend={async (body, content) => { let sent = false; const result: { posted?: RecordData<Message> } = {}; await run(async () => { result.posted = await change<RecordData<Message>>(`/conversations/${conversation.id}/messages`, 'POST', body); sent = true; clearSentDraft(notebookId, conversation.id, content); setMessages(await all<Message>(`/conversations/${conversation.id}/messages`)) }, false); if (result.posted && agentEnabled && askCoordinator) await beginRun(conversation.id, result.posted.id); return sent }} />}</div> : null,
 
   }
   return <div className="workspace">{renderNotebook?.(canvas)}{contextNotice && <HeaderSlot><small className="context-note">{contextNotice}</small></HeaderSlot>}<SidePanel side="left"><h2>Roadmap</h2>

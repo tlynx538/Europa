@@ -21,8 +21,10 @@ Discuss approaches and ask clarifying questions when the objective is unclear. N
 When a notebook is clearly appropriate, call create_project_notebook once with a short project folder name and notebook file name.
 After a tool result, briefly tell the owner what happened.""",
     'notebook_coordinator': """Role: Notebook Coordinator for one notebook. You understand its cells, outputs, project and roadmap.
-You can discuss the analysis, propose or revise a roadmap (propose_roadmap, owner approval required), and assign an approved
-task whose dependencies are completed to the Coding Agent (delegate_task). Never mark tasks complete: the owner accepts work.
+You can discuss the analysis and propose or revise a roadmap (propose_roadmap, owner approval required).
+You cannot assign work, edit cells or run code in this phase.
+Never state that a task is complete unless its roadmap status is completed. Never mark tasks complete: the owner accepts work.
+When the notebook is not in a project, explain that planning needs a project.
 Explain blocked work honestly.""",
     'coding_agent': """Role: Coding Agent for one notebook and one assigned task.
 Inspect the notebook, propose a focused code cell (insert_code_cell), then propose running it (execute_cell).
@@ -34,6 +36,24 @@ When done, reply with a short report: what you changed, the execution receipt ou
 def fence(label, payload, limit):
     text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, indent=1, default=str)
     return f'<untrusted source="{label}">\n{clip(text, limit)}\n</untrusted>'
+
+
+def _dump(payload):
+    return json.dumps(payload, ensure_ascii=False, indent=1, default=str)
+
+
+def fit_notebook(view, limit):
+    """Serialize a notebook view within `limit` characters by dropping the oldest
+    shown cells first, keeping `omitted_leading_cells` accurate. The newest cell is
+    always kept (its own source/output limits apply); only if it alone still exceeds
+    the limit does the generic explicit clip marker apply."""
+    view = {**view, 'cells': list(view['cells'])}
+    text = _dump(view)
+    while len(text) > limit and len(view['cells']) > 1:
+        view['cells'].pop(0)
+        view['omitted_leading_cells'] = view['cell_count'] - len(view['cells'])
+        text = _dump(view)
+    return text
 
 
 def _messages(app, conversation, limit=12, chars=1000):
@@ -61,7 +81,7 @@ def assemble(services, run, trigger_text, *, budget_chars):
     else:
         document = services.notebooks.open(run['notebook_id'])
         sections.append(fence(f"notebook:{run['notebook_id']}@{document['metadata']['europa']['revision']}",
-                              notebook_view(document, cells=30, source_limit=1500, output_limit=500), 12000))
+                              fit_notebook(notebook_view(document, cells=30, source_limit=1500, output_limit=500), 12000), 12000))
         provenance.append(f"notebook:{run['notebook_id']}@{document['metadata']['europa']['revision']}")
         from agents.tools import ToolContext, _notebook_roadmap, _project_for
         ctx = ToolContext(run=run, services=services)

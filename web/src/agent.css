@@ -44,3 +44,19 @@
   .home-composer-buttons { justify-content: flex-end; }
   .home-message { max-width: 100%; }
 }
+
+/* Phase 4C: roadmap previews and notebook-stream run panels. */
+.agent-approval, .agent-run { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
+.agent-plan { margin: 0 0 8px; }
+.agent-objective { margin: 0 0 6px; }
+.agent-plan-tasks { margin: 0 0 6px; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
+.agent-task-after, .agent-plan-tasks small { color: var(--muted); }
+.agent-criteria { margin: 2px 0 0; padding-left: 16px; color: var(--muted); }
+.agent-binding { margin: 0 0 6px; color: var(--muted); }
+.agent-buttons { flex-wrap: wrap; }
+.agent-reveal { margin-top: 3px; }
+.agent-stream { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+/* The composer shell floats over the scrolling stream: its additions need an opaque surface. */
+.agent-ask { display: flex; align-items: center; gap: 6px; width: fit-content; margin: 0 0 6px 8px; padding: 3px 10px 3px 6px;
+  font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.agent-stream-alert { margin: 0 8px 6px; padding: 6px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; }

@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from internal.middleware import debug_middleware
 from internal.router import router
+from internal.health import router as health_router
 from notebooks.router import router as notebook_router
 from notebooks.store import NotebookStore, NotebookError
 from notebooks.service import NotebookService
@@ -211,6 +212,7 @@ def create_app(*, gateway_url: str | None = None, gateway_token: str | None = No
         return {"message": "Europa API", "backend": "jupyter-kernel-gateway"}
 
     app.middleware("http")(debug_middleware)
+    app.include_router(health_router)  # top-level GET/HEAD /health; side-effect free
     app.include_router(router, prefix="/api", tags=["kernel"])
     app.include_router(notebook_router, prefix="/api", tags=["notebooks"])
     app.include_router(application_router, prefix="/api", tags=["application"])
