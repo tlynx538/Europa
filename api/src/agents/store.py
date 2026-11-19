@@ -76,6 +76,14 @@ class AgentStore:
             self._event(db, identity, 'run_queued', {'role': role, **(event or {})})
             return self.run_row(db.execute('SELECT * FROM agent_runs WHERE id=?', (identity,)).fetchone()), True
 
+    def run_by_operation(self, operation_id, payload):
+        """The run created by `operation_id` (exact replay), None if there is none; 409 on different input."""
+        with self.tx() as db:
+            row = db.execute('SELECT * FROM agent_runs WHERE operation_id=?', (operation_id,)).fetchone()
+        if row is None: return None
+        if row['fingerprint'] != fingerprint(payload): raise ApplicationError('Operation ID reused with different input', 409)
+        return self.run_row(row)
+
     def get_run(self, run_id):
         with self.tx() as db:
             row = db.execute('SELECT * FROM agent_runs WHERE id=?', (run_id,)).fetchone()
@@ -127,6 +135,11 @@ class AgentStore:
         with self.tx() as db:
             self._fence(db, run_id, lease)
             self._event(db, run_id, kind, data)
+
+    def last_event(self, run_id, kind):
+        with self.tx() as db:
+            row = db.execute('SELECT * FROM agent_events WHERE run_id=? AND type=? ORDER BY seq DESC LIMIT 1', (run_id, kind)).fetchone()
+        return None if row is None else {'seq': row['seq'], 'type': row['type'], 'data': json.loads(row['data'])}
 
     def events(self, run_id, after=0, limit=100):
         with self.tx() as db:
@@ -244,8 +257,16 @@ class AgentStore:
     def approvals(self, run_id):
         with self.tx() as db:
             return [self.approval_row(r) for r in db.execute(
-                'SELECT agent_approvals.*, agent_tool_calls.name AS tool FROM agent_approvals JOIN agent_tool_calls '
+                'SELECT agent_approvals.*, agent_tool_calls.name AS tool, '
+                "json_extract(agent_tool_calls.result, '$.reason') AS reason FROM agent_approvals JOIN agent_tool_calls "
                 'ON agent_tool_calls.id=tool_call_id WHERE agent_approvals.run_id=? ORDER BY agent_approvals.created_at', (run_id,))]
+
+    def approval(self, approval_id):
+        with self.tx() as db:
+            row = db.execute('SELECT agent_approvals.*, agent_tool_calls.name AS tool FROM agent_approvals JOIN agent_tool_calls '
+                             'ON agent_tool_calls.id=tool_call_id WHERE agent_approvals.id=?', (approval_id,)).fetchone()
+        if row is None: raise ApplicationError('Approval not found', 404)
+        return self.approval_row(row)
 
     def approval_for_call(self, call_id):
         with self.tx() as db:
@@ -261,6 +282,8 @@ class AgentStore:
         with self.tx() as db:
             row = db.execute('SELECT * FROM agent_approvals WHERE id=?', (approval_id,)).fetchone()
             if row is None: raise ApplicationError('Approval not found', 404)
+            # 'repropose' (Phase 4D) is a denial with reason stale_revision; the runtime has already
+            # verified that the bound notebook revision is stale. The model is told to re-read and propose again.
             expected = 'approved' if decision == 'approve' else 'denied'
             if row['decision_operation_id'] == operation_id:
                 if row['state'] != expected: raise ApplicationError('Operation ID reused with different input', 409)
@@ -285,8 +308,11 @@ class AgentStore:
             db.execute('UPDATE agent_approvals SET state=?,decided_at=?,decision_operation_id=? WHERE id=?',
                        (expected, now, operation_id, approval_id))
             db.execute('UPDATE agent_tool_calls SET state=? WHERE id=?', ('approved' if expected == 'approved' else 'denied', row['tool_call_id']))
+            if decision == 'repropose':
+                db.execute('UPDATE agent_tool_calls SET result=? WHERE id=?', (encoded({'reason': 'stale_revision'}), row['tool_call_id']))
             db.execute("UPDATE agent_runs SET state='queued',updated_at=? WHERE id=?", (now, row['run_id']))
-            self._event(db, row['run_id'], 'approval_decided', {'approval_id': approval_id, 'decision': expected})
+            self._event(db, row['run_id'], 'approval_decided', {'approval_id': approval_id, 'decision': expected,
+                                                                **({'reason': 'stale_revision'} if decision == 'repropose' else {})})
             return self.approval_row(db.execute('SELECT * FROM agent_approvals WHERE id=?', (approval_id,)).fetchone()), True
 
     def expire_approvals(self):

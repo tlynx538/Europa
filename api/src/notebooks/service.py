@@ -18,13 +18,14 @@ class NotebookService:
     def _retrieve(future):
         if not future.cancelled(): future.exception()
 
-    async def submit(self, notebook, cell, revision, *, kernel_id=None, timeout=30):
+    async def submit(self, notebook, cell, revision, *, kernel_id=None, timeout=30, execution_id=None):
+        """`execution_id` (32 hex, optional) makes acceptance idempotent; see NotebookStore.begin."""
         if self.closed: raise NotebookError('Notebook execution service is closing', 503)
         if notebook in self.interrupts: raise NotebookError('Notebook interrupt is still being acknowledged', 409)
         if notebook in self.tasks: raise NotebookError('Notebook already has an active document execution', 409)
         ready = asyncio.get_running_loop().create_future()
         ready.add_done_callback(self._retrieve)
-        task = asyncio.create_task(self._run(ready, notebook, cell, revision, kernel_id, timeout))
+        task = asyncio.create_task(self._run(ready, notebook, cell, revision, kernel_id, timeout, execution_id))
         self.tasks[notebook] = task
         task.add_done_callback(lambda done: self._done(notebook, done))
         return await asyncio.shield(ready)
@@ -74,10 +75,10 @@ class NotebookService:
             client = lifecycle.gateway(notebook, identity, client)
         await client.interrupt_kernel(receipt['kernel_id'])
 
-    async def _run(self, ready, notebook, cell, revision, kernel_id, timeout):
+    async def _run(self, ready, notebook, cell, revision, kernel_id, timeout, execution_id=None):
         receipt = None
         try:
-            receipt, code = await asyncio.to_thread(self.store.begin, notebook, cell, revision)
+            receipt, code = await asyncio.to_thread(self.store.begin, notebook, cell, revision, execution_id)
             ready.set_result(receipt)
             client = await self.supervisor.client_for(notebook)
             identity = self.supervisor.notebooks[notebook]

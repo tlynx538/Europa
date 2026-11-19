@@ -22,6 +22,31 @@ take a separate branch; rules apply in this order:
 4. a status request ("status", "left", "blocked", "progress", "done") calls
    read_roadmap and lists task states taken only from that tool result;
 5. anything else gets a short reply naming the notebook's cell count and revision.
+
+Phase 4D Stage 1 adds two Notebook Coordinator behaviours:
+- kickoff runs (the trusted system prompt contains "Kickoff run:") call ask_owner
+  with five questions naming the purpose's key subject; after that result a
+  project notebook gets a draft propose_roadmap (Markov tasks when the purpose
+  mentions Markov, generic tasks otherwise) and then one short sentence; a
+  standalone notebook gets one short sentence saying planning needs a project;
+- answers: when the newest needs_input coordinator message in the fenced
+  conversation has no owner message after it except the current one, and the
+  message is not a status request, the message is treated as an answer and a
+  propose_roadmap revision of the current roadmap (or a fresh draft when none
+  was saved) adds one task titled from the answer. This rule runs before rule 2.
+
+Phase 4D Stage 2:
+- Coding Agent runs (system prompt contains "Role: Coding Agent") propose one
+  insert_code_cell with pure-Python Markov code chosen by the task title (matrix,
+  simulate, stationary, convergence; a small generic cell otherwise; the title
+  never enters the code), then execute_cell on the inserted cell, then a short
+  report (the harness appends receipt facts). On an applied error receipt it
+  proposes one replace_cell_source repair of that cell and runs it again; a
+  denial or conflict is reported honestly as "nothing ran". A stale proposal the owner
+  sends back with Re-propose is re-read (read_notebook) and proposed again once; a
+  second stale conflict is reported honestly.
+- Notebook Coordinator: "assign"/"start" (outside an open-questions answer)
+  proposes delegate_task for the first task whose dependencies are completed.
 """
 import json
 import re
@@ -223,20 +248,265 @@ def status_report(result):
     return '\n'.join(lines)
 
 
+# --------------------------------------------------------------------------- Phase 4D kickoff and answers
+
+KICKOFF_ROLE = 'Kickoff run:'
+KICKOFF_TEXT = re.compile(r"^Kickoff for a new notebook\. Owner's purpose:\s*(.*)$", re.DOTALL)
+PURPOSE_PREFIX = re.compile(r'^\s*owner objective:\s*', re.IGNORECASE)
+
+
+def subject(purpose):
+    """The purpose's key subject in the owner's own words, e.g. 'Markov chain'."""
+    text = PURPOSE_PREFIX.sub('', purpose)
+    match = None
+    for match in INTENT.finditer(text):
+        pass
+    words = key_words(text[match.end():] if match else text) or key_words(text)
+    return ' '.join(words[:MAX_WORDS]) or 'this notebook'
+
+
+def kickoff_questions(purpose):
+    topic = subject(purpose)
+    return [f'What do you want to achieve with the {topic}, and how will you know the notebook succeeded?',
+            f'What data should the {topic} work use: a file, an API, or data we simulate here?',
+            f'What outputs do you expect from the {topic} analysis: plots, tables, a model or a written summary?',
+            f'Are there constraints on time, tools or libraries for the {topic} work?',
+            f'What do you already know about the {topic}, so I can skip or explain the basics?']
+
+
+def _history(context):
+    """The fenced conversation history, or [] when it is missing or truncated."""
+    body = next((body for source, body in FENCE.findall(context) if source.startswith('conversation:')), None)
+    try:
+        items = json.loads(body) if body else []
+    except ValueError:
+        return []
+    return items if isinstance(items, list) else []
+
+
+def open_questions(context):
+    """True when the newest needs_input coordinator message has no owner message after it
+    other than the current one (the last entry), i.e. the owner is answering it now."""
+    history = _history(context)
+    for index in range(len(history) - 1, -1, -1):
+        item = history[index] if isinstance(history[index], dict) else {}
+        if item.get('author') == 'coordinator' and item.get('needs_input'):
+            later = [x for x in history[index + 1:] if isinstance(x, dict) and x.get('author') == 'user']
+            return len(later) == 1
+    return False
+
+
+def answer_arguments(text, context, roadmap):
+    """A revision (or a fresh draft when nothing was saved) that incorporates the answer."""
+    answer = ' '.join(text.split())
+    title = clip_title(f'Use your answer: {answer}')
+    if roadmap:
+        arguments, kept, _ = plan_arguments('', '', roadmap)
+        arguments['tasks'] = arguments['tasks'][:kept]
+    else:
+        arguments, kept, _ = plan_arguments(text, context, None)
+        arguments['objective'] = clip_title(f'Plan for: {answer}', 2000)
+    keys = {t['key'] for t in arguments['tasks']}
+    key = 'answer'
+    while key in keys: key += '-n'
+    previous = arguments['tasks'][-1]['key'] if arguments['tasks'] else None
+    arguments['tasks'].append({'key': key, 'title': title, 'acceptance_criteria': [clip_title(f'The notebook reflects the owner answer: {answer}')],
+                               'depends_on': [previous] if previous else []})
+    arguments['rationale'] = 'Deterministic demo revision from the owner answer (not an LLM).'
+    return arguments
+
+
+def clip_title(text, limit=200):
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
+
+
+def _answer_proposal(text, context, roadmap):
+    arguments = answer_arguments(text, context, roadmap)
+    verb = 'revising the roadmap' if roadmap else 'a draft roadmap'
+    return _call('propose_roadmap', f'Thanks. I propose {verb} that adds a task for your answer. '
+                 'Please review the plan; nothing is saved until you approve it.', arguments)
+
+
+def _roadmap_from_context(context):
+    """(found, roadmap view or None). found=False means the fenced roadmap was unreadable."""
+    fenced = _fenced(context, 'roadmap')
+    if fenced is None or fenced == 'No roadmap yet.':
+        return True, None
+    try:
+        roadmap = json.loads(fenced)
+    except ValueError:
+        return False, None
+    return True, roadmap if isinstance(roadmap, dict) else None
+
+
+def kickoff_turn(messages, available, text, context, standalone):
+    purpose = (KICKOFF_TEXT.match(text) or [None, text])[1].strip()
+    result = _result(messages)
+    if result is None:
+        if 'ask_owner' not in available:
+            return ModelResponse(content='The notebook is ready. Tell me what you want to do first.', finish_reason='stop')
+        return _call('ask_owner', 'A few questions before we start.', {
+            'preamble': f'Before we start on the {subject(purpose)}, a few questions:', 'questions': kickoff_questions(purpose)})
+    tool = _last_tool(messages)
+    if tool == 'ask_owner':
+        if standalone or 'propose_roadmap' not in available:
+            return ModelResponse(finish_reason='stop', content=(
+                'Please answer the questions above. Planning needs a project, and this notebook is not in one, so I did not draft a roadmap.'))
+        found, roadmap = _roadmap_from_context(context)
+        arguments, kept, added = plan_arguments(PURPOSE_PREFIX.sub('', purpose), context, roadmap if found else None)
+        return _call('propose_roadmap', (
+            f'This is a draft roadmap with {added} tasks built from your purpose: '
+            + ' → '.join(t['title'] for t in arguments['tasks'][kept:])
+            + '. Your answers can refine it; nothing is saved until you approve it.'),
+            {**arguments, 'rationale': 'Draft built from the purpose; answers to the questions can refine it. Deterministic demo (not an LLM).'})
+    if tool == 'propose_roadmap':
+        if result.get('status', 'ok') == 'ok':
+            return ModelResponse(finish_reason='stop', content='Saved the draft roadmap; answer the questions above and I will refine it.')
+        return ModelResponse(finish_reason='stop', content='The draft was not saved; answer the questions above and I will propose a plan.')
+    return ModelResponse(content='Please answer the questions above.', finish_reason='stop')
+
+
+# --------------------------------------------------------------------------- Phase 4D Stage 2: Coding Agent
+
+CODING_ROLE = 'Role: Coding Agent'
+ASSIGN = re.compile(r'\b(assign|start)\b', re.IGNORECASE)
+MATRIX = 'P = [[0.9, 0.1], [0.5, 0.5]]\n'
+STEP = 'pi = [sum(pi[i] * P[i][j] for i in range(2)) for j in range(2)]\n'
+CODE = (
+    ('matrix', MATRIX + "for state, row in zip(['A', 'B'], P):\n    print(f'{state}: row sum = {sum(row)}')\n"),
+    ('simulat', 'import random\n\nrandom.seed(7)\n' + MATRIX + 'state, visits = 0, [0, 0]\nfor _ in range(10000):\n'
+                '    visits[state] += 1\n    state = 0 if random.random() < P[state][0] else 1\n'
+                "print('visit frequencies:', [round(v / sum(visits), 3) for v in visits])\n"),
+    ('stationary', MATRIX + 'pi = [0.5, 0.5]\nfor _ in range(100):\n    ' + STEP
+                   + "print('stationary distribution:', [round(p, 4) for p in pi])\n"),
+    ('converg', MATRIX + 'target = [5 / 6, 1 / 6]\npi = [1.0, 0.0]\nfor step in range(1, 11):\n    ' + STEP
+                + '    gap = max(abs(a - b) for a, b in zip(pi, target))\n'
+                + "    print(f'step {step}: gap = {gap:.4f}')\n"),
+)
+GENERIC_CODE = "values = [1, 2, 3]\nprint('sum =', sum(values))\n"
+
+
+def task_code(title):
+    """Task-specific Markov code chosen by title; the title itself never enters the code."""
+    lowered = (title or '').lower()
+    return next((code for key, code in CODE if key in lowered), GENERIC_CODE)
+
+
+def _task_title(messages):
+    user = next((m['content'] for m in messages if m['role'] == 'user'), '') or ''
+    body = _fenced(user, 'coordinator-instructions') or ''
+    match = re.match(r'Task [^:]+: (.*)', body)
+    return match.group(1).strip() if match else ''
+
+
+def _calls_made(messages, name):
+    return [c for m in messages for c in (m.get('tool_calls') or []) if c['name'] == name]
+
+
+def coding_report(result, what):
+    status, summary = result.get('status', 'ok'), (result.get('summary') or '').strip()
+    if status == 'denied':
+        return f'You denied the {what}, so nothing ran. Nothing else was attempted.'
+    if status in {'expired', 'cancelled'}:
+        return f'The {what} {status} before approval, so nothing ran.'
+    if status == 'conflict':
+        return f'The {what} hit a conflict: {summary} Nothing was overwritten and nothing ran.'
+    return f'The {what} did not complete ({status}): {summary}'
+
+
+STALE = 'The notebook changed since this was proposed. Re-read it and propose again.'
+
+
+def _stale_calls(messages):
+    """The proposals the owner sent back with Re-propose (stale notebook revision), oldest first."""
+    calls = {c['id']: c for m in messages for c in (m.get('tool_calls') or [])}
+    found = []
+    for message in messages:
+        if message['role'] == 'tool':
+            try:
+                payload = json.loads(message['content'])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict) and payload.get('summary') == STALE and message.get('tool_call_id') in calls:
+                found.append(calls[message['tool_call_id']])
+    return found
+
+
+def coding_turn(messages):
+    """Insert a task-specific cell, run it, repair once on an error receipt, then report. A stale
+    proposal sent back with Re-propose is re-read and proposed again once."""
+    result = _result(messages)
+    title = _task_title(messages)
+    stale = _stale_calls(messages)
+    if result is not None and result.get('summary') == STALE:
+        if len(stale) >= 2:
+            return ModelResponse(finish_reason='stop', content=(
+                'The notebook changed again before my proposal could be approved, so nothing was applied for it. '
+                'Assign the task again when the notebook is settled.'))
+        return _call('read_notebook', 'The notebook changed; re-reading it before proposing again.')
+    if result is not None and _last_tool(messages) == 'read_notebook' and stale:
+        again = stale[-1]
+        return _call(again['name'], 'Proposing the same change again against the current notebook.', json.loads(again['arguments'] or '{}'))
+    if result is None:
+        return _call('insert_code_cell', f'I will add a cell for "{title or "this task"}".',
+                     {'source': task_code(title), 'explanation': f'Code for the task: {title or "assigned task"}'[:2000]})
+    tool = _last_tool(messages)
+    data = result.get('data') or {}
+    if tool in ('insert_code_cell', 'replace_cell_source'):
+        if result.get('status', 'ok') != 'ok' or not data.get('cell_id'):
+            return ModelResponse(content=coding_report(result, 'cell edit'), finish_reason='stop')
+        return _call('execute_cell', 'Proposing to run the cell.', {'cell_id': data['cell_id'], 'explanation': 'Run the new cell'})
+    if tool == 'execute_cell':
+        if result.get('status') == 'ok':
+            return ModelResponse(content='I added the cell and ran it; the receipt output is quoted below.', finish_reason='stop')
+        if data.get('state') == 'applied' and data.get('status') == 'error' and not _calls_made(messages, 'replace_cell_source'):
+            return _call('replace_cell_source', 'The run failed; proposing one repair of the same cell.', {
+                'cell_id': data['cell_id'], 'source': '# Repaired after an error receipt\n' + task_code(title),
+                'explanation': 'Repair after the failed run'})
+        if data.get('state') == 'applied':
+            return ModelResponse(content='The cell ran but failed; I stopped after one repair. The receipt is quoted below.', finish_reason='stop')
+        return ModelResponse(content=coding_report(result, 'run'), finish_reason='stop')
+    return ModelResponse(content=coding_report(result, 'action'), finish_reason='stop')
+
+
+def _ready_task(roadmap):
+    tasks = {t['task_id']: t for t in (roadmap or {}).get('tasks') or []}
+    return next((t for t in tasks.values() if t['status'] in ('pending', 'blocked', 'needs_input')
+                 and all(tasks.get(d, {}).get('status') == 'completed' for d in t['dependencies'])), None)
+
+
 def notebook_turn(messages, available):
     text, context = owner_message(messages), _context(messages)
     standalone = 'Project: none' in _unfenced(context)
+    if KICKOFF_ROLE in _system(messages):
+        return kickoff_turn(messages, available, text, context, standalone)
+    answering = (not standalone and 'propose_roadmap' in available and not STATUS.search(text)
+                 and open_questions(context))
+    if not answering and _result(messages) is None and ASSIGN.search(text) and 'delegate_task' in available and not standalone:
+        found, roadmap = _roadmap_from_context(context)
+        task = _ready_task(roadmap) if found else None
+        if task is None:
+            return ModelResponse(finish_reason='stop', content='No roadmap task is ready to assign: each needs its dependencies completed first.')
+        return _call('delegate_task', f"I propose assigning \"{task['title']}\" to the Coding Agent. Please review; nothing starts until you approve.",
+                     {'task_id': task['task_id'], 'instructions': f"Complete \"{task['title']}\" and meet its acceptance criteria."})
     result = _result(messages)
     if result is not None:
         tool = _last_tool(messages)
         if tool == 'propose_roadmap':
             return ModelResponse(content=plan_report(result), finish_reason='stop')
+        if tool == 'read_roadmap' and answering and result.get('status') == 'ok' and (result.get('data') or {}).get('project_id'):
+            return _answer_proposal(text, context, (result.get('data') or {}).get('roadmap'))
         if tool == 'read_roadmap' and PLAN.search(text) and result.get('status') == 'ok' \
                 and (result.get('data') or {}).get('project_id') and 'propose_roadmap' in available:
             return _propose(text, context, (result.get('data') or {}).get('roadmap'))
         if tool == 'read_roadmap':
             return ModelResponse(content=status_report(result), finish_reason='stop')
         return ModelResponse(content=(result.get('summary') or 'Done.').strip(), finish_reason='stop')
+    if answering:
+        found, roadmap = _roadmap_from_context(context)
+        if not found:  # Context was truncated: read the authoritative roadmap first.
+            return _call('read_roadmap', 'Reading the current roadmap before revising it with your answer.')
+        return _answer_proposal(text, context, roadmap)
     if standalone and PLAN.search(text):
         return ModelResponse(finish_reason='stop', content=(
             'Planning needs a project. This notebook is not in a project, so I cannot create a roadmap for it. '
@@ -269,6 +539,8 @@ class DemoProvider(Provider):
     label = LABEL
 
     async def complete(self, messages, tools, *, max_tokens):
+        if CODING_ROLE in _system(messages):
+            return coding_turn(messages)
         if NOTEBOOK_ROLE in _system(messages):
             return notebook_turn(messages, {t['name'] for t in tools})
         result = _result(messages)

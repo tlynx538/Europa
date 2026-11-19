@@ -60,3 +60,23 @@
 .agent-ask { display: flex; align-items: center; gap: 6px; width: fit-content; margin: 0 0 6px 8px; padding: 3px 10px 3px 6px;
   font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
 .agent-stream-alert { margin: 0 8px 6px; padding: 6px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; }
+/* Phase 4D: a Coordinator message that asks the owner questions. */
+.needs-input-badge { margin-right: auto; padding: 1px 8px; border: 1px solid var(--warning); border-radius: 10px; color: var(--warning);
+  background: var(--surface); font-size: 11px; font-weight: 600; }
+/* Phase 4D Stage 2: cell previews and a clearly distinct blocked Approve. */
+.agent-code-label { margin: 6px 0 2px; font-size: 11px; color: var(--muted); }
+.agent-code { margin: 0 0 6px; padding: 6px 8px; max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--canvas); border: 1px solid var(--line); border-radius: 4px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* Overrides the global button:hover (tint background), which made the white label invisible. */
+.agent-approve:hover:not(:disabled) { background: var(--accent); color: var(--surface); border-color: var(--accent);
+  filter: brightness(1.12); box-shadow: 0 0 0 2px var(--tint); }
+.agent-approve:disabled { background: var(--canvas); color: var(--muted); border: 1px dashed var(--muted); cursor: not-allowed; opacity: 1; }
+.agent-blocked { align-self: center; font-size: 12px; font-weight: 600; color: var(--warning); }
+.agent-assign { margin-top: 4px; font-size: 12px; }
+.agent-assign:disabled { cursor: not-allowed; color: var(--muted); }
+/* Phase 4D Stage 3: live Coding Agent state on roadmap tasks. */
+.agent-task-status { display: block; margin: 3px 0; font-size: 12px; color: var(--muted); }
+.agent-task-status.waiting { color: var(--warning); font-weight: 600; }
+.agent-task-status.waiting button { margin-left: 6px; font-size: 12px; font-weight: 400; }
+.agent-task-status.blocked { color: var(--error); }
+.task-reopen { margin-top: 4px; font-size: 12px; }

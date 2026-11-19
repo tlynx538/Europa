@@ -72,6 +72,7 @@ For the Phase 4B Home Coordinator, read
 [its design](docs/phase4b-home-coordinator.md) and
 [validation report](docs/phase4b-validation.md).
 For the Phase 4C Notebook Coordinator and `GET /health`, read [its design](docs/phase4c-notebook-coordinator.md) and [validation report](docs/phase4c-validation.md).
+For the Phase 4D Coding Agent, kickoff and progress, read [its design](docs/phase4d-coding-agent.md), [validation report](docs/phase4d-validation.md) and [owner brief](docs/agent-prompts/phase4d-coding-agent.md).
 
 - On this development machine, use one OpenCode worker and one heavy validation
   job at a time. Do not recursively spawn agents or run duplicate browser suites.

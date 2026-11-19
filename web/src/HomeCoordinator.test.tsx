@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { HomeCoordinator, homeDraftKey } from './HomeCoordinator'
 import { pendingKey } from './agentApi'
+import { consumeKickoffFocus, kickoffFocusPending } from './kickoffFocus'
 
 afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
@@ -111,6 +112,8 @@ it('offers Open notebook on coordinator replies and refreshes the workspace on a
   messages.push(message('r'.repeat(32), 'coordinator', 'Created Markov Chain/markov-chain.ipynb.', { notebook_id: N }))
   fireEvent.click(await screen.findByRole('button', { name: 'Open notebook' }, { timeout: 4000 }))
   expect(navigate).toHaveBeenCalledWith(`/notebooks/${N}`)
+  expect(kickoffFocusPending(N)).toBe(true)  // Phase 4D: the notebook view reveals the kickoff questions once
+  consumeKickoffFocus()
   expect(changed).toHaveBeenCalledTimes(1)
   expect(document.querySelector('.home-thread [data-author="coordinator"]')?.textContent).toContain('Created Markov Chain/markov-chain.ipynb')
 }, 10000)

@@ -19,18 +19,32 @@ ROLE_PROMPTS = {
     'home_coordinator': """Role: Home Coordinator. Help the owner think through an objective.
 Discuss approaches and ask clarifying questions when the objective is unclear. Not every question needs a notebook.
 When a notebook is clearly appropriate, call create_project_notebook once with a short project folder name and notebook file name.
+When information you need is missing, you may call ask_owner (at most once per run) with specific numbered questions.
 After a tool result, briefly tell the owner what happened.""",
     'notebook_coordinator': """Role: Notebook Coordinator for one notebook. You understand its cells, outputs, project and roadmap.
 You can discuss the analysis and propose or revise a roadmap (propose_roadmap, owner approval required).
-You cannot assign work, edit cells or run code in this phase.
+You can propose assigning one ready roadmap task (all dependencies completed) to the Coding Agent with delegate_task; the owner approves it.
+You never edit cells or run code yourself.
 Never state that a task is complete unless its roadmap status is completed. Never mark tasks complete: the owner accepts work.
 When the notebook is not in a project, explain that planning needs a project.
+When information you need is missing, call ask_owner (at most once per run) with specific numbered questions.
+Messages marked needs_input in the conversation are your earlier questions; a later owner message may answer them.
 Explain blocked work honestly.""",
     'coding_agent': """Role: Coding Agent for one notebook and one assigned task.
 Inspect the notebook, propose a focused code cell (insert_code_cell), then propose running it (execute_cell).
-Each edit and each run needs owner approval. Read the receipt result; if it failed, propose a bounded correction.
-When done, reply with a short report: what you changed, the execution receipt outcome and the observed output.""",
+You can only run cells you wrote or replaced in this task. Each edit and each run needs owner approval.
+Read the receipt result. If it failed, your next action must be replace_cell_source on that same cell (then execute_cell),
+or an insert_markdown_cell note explaining the failure; at most two repairs.
+When done, reply with a short report: what you changed, the execution receipt outcome and the observed output.
+Quote output only from execution receipts; if nothing ran, say so.""",
 }
+
+KICKOFF_PROMPT = """Kickoff run: this notebook was just created from Home and the owner has not written here yet.
+1. Call ask_owner first with 3 to 5 numbered questions specific to the owner's purpose: goal and success criteria,
+   data source, expected outputs, constraints or time, and prior knowledge.
+2. Then, if the notebook is in a project, call propose_roadmap with a draft plan built from the purpose. Say it is a
+   draft that the owner's answers can refine. If it is not in a project, do not plan: planning needs a project.
+3. Then reply with one short sentence."""
 
 
 def fence(label, payload, limit):
@@ -63,7 +77,8 @@ def _messages(app, conversation, limit=12, chars=1000):
         page = app.listing('message', parent=conversation, after=page['next_cursor'], limit=100)
         items += page['items']
     return [{'author': m['data']['author_role'], 'content': clip(m['data']['content'], chars),
-             **({'cell_id': m['data']['cell_id']} if m['data'].get('cell_id') else {})} for m in items[-limit:]]
+             **({'cell_id': m['data']['cell_id']} if m['data'].get('cell_id') else {}),
+             **({'needs_input': True} if m['data'].get('state') == 'needs_input' else {})} for m in items[-limit:]]
 
 
 def assemble(services, run, trigger_text, *, budget_chars):
@@ -94,7 +109,7 @@ def assemble(services, run, trigger_text, *, budget_chars):
             provenance += [f'project:{project}', f"roadmap:{roadmap['id']}@{roadmap['revision']}" if roadmap else 'roadmap:none']
         else:
             sections.append('Project: none. This notebook is not in a project, so a roadmap cannot be created yet.')
-        if run.get('task'):
+        if role == 'coding_agent' and run.get('task'):
             sections.append(fence('assigned-task', run['task'], 3000))
             provenance.append(f"task:{run['task'].get('task_id')}")
     if role != 'coding_agent':
@@ -110,4 +125,7 @@ def assemble(services, run, trigger_text, *, budget_chars):
     else:
         request = 'Owner message:\n' + clip(trigger_text, 6000)
     user = f'Context:\n{context}\n\n{request}'
-    return COMMON + '\n\n' + ROLE_PROMPTS[role], user, provenance
+    system = COMMON + '\n\n' + ROLE_PROMPTS[role]
+    if role == 'notebook_coordinator' and (run.get('task') or {}).get('kickoff'):
+        system += '\n\n' + KICKOFF_PROMPT  # Trusted: only the harness creates kickoff runs.
+    return system, user, provenance

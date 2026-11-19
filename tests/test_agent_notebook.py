@@ -8,6 +8,7 @@ import pytest_asyncio
 
 from agents.demo import DemoProvider
 from agents.policy import ROLES, Budget, PolicyDenied, PolicyEngine
+from agents.tools import REGISTRY
 from agents.providers import FakeProvider
 from application import models as m
 from application.store import ApplicationError
@@ -34,7 +35,8 @@ MARKOV = [
      'depends_on': ['simulate']},
     {'key': 'plot', 'title': 'Visualize convergence', 'acceptance_criteria': ['A convergence plot is shown'], 'depends_on': ['stationary']},
 ]
-FORBIDDEN = ('read_notebook_summary', 'delegate_task', 'insert_code_cell', 'execute_cell')
+# Phase 4D Stage 2: delegate_task is no longer forbidden; it is an approval-gated proposal (asserted below).
+FORBIDDEN = ('read_notebook_summary', 'insert_code_cell', 'execute_cell')
 
 
 def propose(tasks=MARKOV, objective='Understand this Markov chain', **extra):
@@ -57,15 +59,19 @@ def roadmaps(h, project):
 
 # ------------------------------------------------------------------ policy
 
-def test_notebook_role_has_no_delegation_and_default_budget():
+def test_notebook_role_has_approval_gated_delegation_and_default_budget():
     role = ROLES['notebook_coordinator']
-    assert role.tools == ('read_notebook', 'read_roadmap', 'read_execution', 'propose_roadmap')
-    assert 'delegate' not in role.capabilities and role.budget == Budget()
+    assert role.tools == ('read_notebook', 'read_roadmap', 'read_execution', 'propose_roadmap', 'ask_owner', 'delegate_task')
+    assert 'delegate' in role.capabilities and role.budget == Budget()
+    assert REGISTRY['delegate_task'].approval is True and REGISTRY['delegate_task'].capability == 'delegate'
     run = {'role': 'notebook_coordinator', 'notebook_id': 'a' * 32, 'depth': 0}
     for name in FORBIDDEN:
         with pytest.raises(PolicyDenied):
             PolicyEngine().check(run, name)
-    assert 'delegate_task' not in [t.name for t in PolicyEngine().tools_for('notebook_coordinator')]
+    assert 'delegate_task' in [t.name for t in PolicyEngine().tools_for('notebook_coordinator')]
+    assert PolicyEngine().check(run, 'delegate_task') is REGISTRY['delegate_task']
+    with pytest.raises(PolicyDenied):  # depth 1 (a Coding Agent's depth) can never delegate
+        PolicyEngine().check({**run, 'depth': 1}, 'delegate_task')
 
 
 # ------------------------------------------------------------------ 1. context
@@ -96,11 +102,11 @@ async def test_context_has_provenance_cells_receipt_output_history_and_project(m
     assert '"title": "Analysis"' in user and '"status": "active"' in user and 'No roadmap yet.' in user
     for secret in ('runtime-secret-id', 'kernel-secret-id', 'session-secret-id', receipt['execution_id']):
         assert secret not in user and secret not in system
-    for sentence in ('You cannot assign work, edit cells or run code in this phase.',
+    for sentence in ('You never edit cells or run code yourself.',
+                     'with delegate_task; the owner approves it.',
                      'Never state that a task is complete unless its roadmap status is completed.',
                      'When the notebook is not in a project, explain that planning needs a project.'):
         assert sentence in system
-    assert 'delegate_task' not in system
     events = h.runtime.store.events(run['id'], 0, 50)['items']
     sources = next(e for e in events if e['type'] == 'context_assembled')['data']['sources']
     assert sources[:3] == [f'notebook:{nid}@{revision}', f'project:{project}', 'roadmap:none']
@@ -240,13 +246,18 @@ async def test_notebook_role_cannot_delegate_edit_execute_or_read_other_notebook
               ('insert_code_cell', {'source': 'print(1)', 'explanation': 'x'}), ('execute_cell', {'cell_id': 'x'})),
         call('read_roadmap'), call('read_notebook'), reply('Done reading.')]
     run = await h.ask(conversation, 'Read everything you can')
+    # Phase 4D Stage 2: delegate_task is an approval-gated proposal; the owner denies it here.
+    assert (await h.settle(run['id']))['state'] == 'waiting_for_approval'
+    assert h.pending_approval(run['id'])['preview']['title'] == "Assign 'Alpha task' to the Coding Agent"
+    await h.approve(run['id'], 'deny')
     assert (await h.settle(run['id']))['state'] == 'completed'
     results = {c['name']: c for c in h.runtime.store.tool_calls(run['id'])}
     for name in FORBIDDEN:
         assert results[name]['state'] == 'rejected' and results[name]['result']['status'] == 'policy'
-    assert not h.runtime.store.approvals(run['id'])
+    assert results['delegate_task']['state'] == 'denied'
+    assert [(a['tool'], a['state']) for a in h.runtime.store.approvals(run['id'])] == [('delegate_task', 'denied')]
     for sent in h.provider.calls:
-        assert not set(FORBIDDEN) & set(sent['tools'])
+        assert not set(FORBIDDEN) & set(sent['tools']) and 'delegate_task' in sent['tools']
     # Everything the harness supplied (system, context, tool results); the model's own
     # rejected call arguments naming B are excluded.
     supplied = json.dumps([x['content'] for x in h.provider.calls[-1]['messages'] if x['role'] != 'assistant'])

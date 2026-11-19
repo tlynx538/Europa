@@ -16,7 +16,7 @@ import time
 import uuid
 
 from notebooks.store import NotebookError, NotebookStore, source, source_hash
-from application.models import Task
+from application.models import Evidence, Task
 from agents.schema import AGENT_SCHEMA, RECORDS_V7, RECORD_DEPENDENTS
 
 SCHEMA_VERSION = 7
@@ -586,7 +586,13 @@ class ApplicationStore:
         data.update(author_role=author_role, conversation_id=row['id'])
         return self._insert('message', None, None, data, row['id'])
 
-    def _validate_plan(self, project, notebook, tasks, roadmap=None):
+    @staticmethod
+    def _evidence_key(evidence):
+        return json.dumps(Evidence.model_validate(evidence).model_dump(), sort_keys=True)
+
+    def _validate_plan(self, project, notebook, tasks, roadmap=None, trusted=None):
+        """`trusted` = (task_id, acceptor) only from the in-process agent harness (never REST):
+        that task's acceptance is recorded as `acceptor`, and notes evidence may be added."""
         by_id = {t['id']: t for t in tasks}
         previous = {} if roadmap is None else {t['id']: t for t in json.loads(self._row(roadmap, 'roadmap')['data'])['tasks']}
         if len(by_id) != len(tasks): raise ApplicationError('Duplicate task IDs')
@@ -631,8 +637,25 @@ class ApplicationStore:
                             raise ApplicationError('Execution evidence must be applied and successful')
                         if task['links'].get('cell_id') and receipt['cell_id'] != task['links']['cell_id']:
                             raise ApplicationError('Execution evidence belongs to another cell')
-            # Owner acceptance is an explicit attestation, not an agent success assertion.
-            task['accepted_by'] = 'user' if task['accepted'] else None
+            prior = previous.get(task['id'])
+            known = {self._evidence_key(e) for e in (prior or {}).get('evidence', [])}
+            target = trusted is not None and task['id'] == trusted[0]
+            for evidence in task['evidence']:
+                if evidence.get('cell_ids') and self._evidence_key(evidence) not in known:
+                    if not target: raise ApplicationError('Notes evidence is recorded only by the server', 422)
+                    if not linked: raise ApplicationError('Notes evidence requires a notebook')
+                    document = self.notebooks.open(linked)
+                    for cell in evidence['cell_ids']: self.notebooks.cell(document, cell)
+            # Owner acceptance is an explicit attestation, not an agent success assertion. Only the
+            # trusted harness path records 'coding_agent' (verified receipts or notes); that attribution
+            # survives later plan edits while the task stays completed with the same evidence.
+            if not task['accepted']: task['accepted_by'] = None
+            elif target: task['accepted_by'] = trusted[1]
+            elif (prior and prior.get('accepted') and prior.get('accepted_by') not in (None, 'user')
+                  and prior['status'] == 'completed' and task['status'] == 'completed'
+                  and [self._evidence_key(e) for e in prior['evidence']] == [self._evidence_key(e) for e in task['evidence']]):
+                task['accepted_by'] = prior['accepted_by']
+            else: task['accepted_by'] = 'user'
 
     def _snapshot(self, record):
         self.db.execute('INSERT INTO versions VALUES (?,?,?,?)',
@@ -648,7 +671,11 @@ class ApplicationStore:
             return record
         return self._mutate(body.operation_id, 'roadmap_create', body.model_dump(), work)
 
-    def roadmap_update(self, roadmap, body, task_only=False):
+    def roadmap_update(self, roadmap, body, task_only=False, *, trusted_acceptor=None):
+        """`trusted_acceptor` (e.g. 'coding_agent') is a server-only path for the agent harness's
+        verified completion of `body.task`; REST routes never pass it and so always record 'user'."""
+        if trusted_acceptor is not None and (not task_only or trusted_acceptor not in {'coding_agent'}):
+            raise ApplicationError('Invalid trusted acceptor')
         def work():
             row = self._row(roadmap, 'roadmap'); self._scope(row['project_id'], row['notebook_id'])
             data = json.loads(row['data'])
@@ -659,11 +686,13 @@ class ApplicationStore:
             else: data = {'objective': body.objective, 'tasks': [t.model_dump() for t in body.tasks]}
             # Presentation fields are recomputed; snapshots hold the underlying plan only.
             for t in data['tasks']: t.pop('accepted_by', None)
-            self._validate_plan(row['project_id'], row['notebook_id'], data['tasks'], roadmap)
+            self._validate_plan(row['project_id'], row['notebook_id'], data['tasks'], roadmap,
+                                trusted=(body.task.id, trusted_acceptor) if trusted_acceptor else None)
             result = self._replace(row, data, body.revision)
             self._snapshot(result)
             return result
-        return self._mutate(body.operation_id, ('task_update/' if task_only else 'roadmap_update/') + roadmap, body.model_dump(), work)
+        kind = 'task_accept/' + trusted_acceptor + '/' if trusted_acceptor else 'task_update/' if task_only else 'roadmap_update/'
+        return self._mutate(body.operation_id, kind + roadmap, body.model_dump(), work)
 
     def comment_create(self, notebook, body):
         def work():

@@ -78,7 +78,7 @@ async def test_discussion_reply_creates_nothing_and_fences_workspace_data(make):
     assert f'<untrusted source="conversation:{conversation}">' in user and '<untrusted source="projects">' in user
     assert user.rstrip().endswith('Owner message:\nHow do inflation and housing prices relate?')
     assert sorted(sent['tools']) == sorted(['list_workspace', 'list_projects', 'list_notebooks',
-                                            'read_notebook_summary', 'create_project_notebook'])
+                                            'read_notebook_summary', 'create_project_notebook', 'ask_owner'])
     steps = h.runtime.store.steps(run['id'])
     assert steps[0]['provenance'] == ['workspace:root', 'projects', f'conversation:{conversation}']
 
@@ -120,8 +120,11 @@ async def test_approved_creation_makes_exactly_the_previewed_resources(make):
     assert tool_call['result']['links'] == {'notebook_id': nid}
     project = h.application.get(data['project_id'], 'project')
     assert [n['notebook_id'] for n in project['data']['notebooks'] if n['present']] == [nid]
+    await h.runtime.idle()  # Phase 4D: the kickoff run (default scripted reply) also posts in the new notebook
     origin = h.messages(data['conversation_id'])
-    assert len(origin) == 1 and origin[0]['data']['author_role'] == 'coordinator'
+    assert len(origin) == 2 and origin[0]['data']['author_role'] == 'coordinator'
+    assert origin[0]['id'] == data['origin_message_id']
+    assert (origin[1]['data']['author_role'], origin[1]['data']['content']) == ('coordinator', 'Kickoff noted.')
     assert origin[0]['data']['content'] == (f'Notebook created from a Home conversation (origin {conversation}). '
                                             'Purpose: Forecast revenue from sales data')
     final = h.messages(conversation)[-1]
@@ -366,7 +369,9 @@ async def test_crash_after_create_effect_recovers_by_replay_without_duplicate(ma
     assert tool_call['state'] == 'succeeded' and tool_call['result']['data'] == first['data']
     assert tree(h.root) == [PROJECT, f'{PROJECT}/.europa-project.json', PATH]
     assert len(h.notebooks.list()) == 1
-    assert len(h.messages(first['data']['conversation_id'])) == 1  # origin message not duplicated
+    await h.runtime.idle()  # Phase 4D: wait for the kickoff run, whose scripted reply is the second message
+    assert [x['data']['content'] for x in h.messages(first['data']['conversation_id'])][1:] == ['Kickoff noted.']
+    assert len(h.messages(first['data']['conversation_id'])) == 2  # origin message not duplicated (+1 kickoff reply)
     assert h.messages(conversation)[-1]['data']['notebook_id'] == first['data']['notebook_id']
 
 

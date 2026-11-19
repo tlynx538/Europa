@@ -35,8 +35,32 @@ def provider_for(script):
     return script if isinstance(script, Provider) else FakeProvider(script)
 
 
+KICKOFF_MARKER = "Owner message:\nKickoff for a new notebook."
+
+
+def is_kickoff(messages):
+    user = next((m['content'] for m in messages if m['role'] == 'user'), '') or ''
+    return KICKOFF_MARKER in user
+
+
+class KickoffSplit(Provider):
+    """Routes Phase 4D kickoff runs to a separate scripted provider so a test's Home script
+    (and `h.provider.calls`) is not consumed by the kickoff run that a Home creation starts."""
+
+    def __init__(self, primary, kickoff):
+        self.primary, self.kickoff = primary, kickoff
+        self.name, self.model = primary.name, primary.model
+
+    async def complete(self, messages, tools, *, max_tokens):
+        target = self.kickoff if is_kickoff(messages) else self.primary
+        return await target.complete(messages, tools, max_tokens=max_tokens)
+
+    async def close(self):
+        await self.primary.close()
+
+
 class Harness:
-    def __init__(self, tmp_path, script, *, notebook_service=None, runtime_options=None):
+    def __init__(self, tmp_path, script, *, notebook_service=None, runtime_options=None, kickoff=None):
         self.tmp_path = tmp_path
         self.root = tmp_path / 'workspace'
         self.root.mkdir(exist_ok=True)
@@ -51,11 +75,15 @@ class Harness:
         self.provider = provider_for(script)
         self.runtime_options = runtime_options or {}
         self.runtime = None
+        # Scripted (FakeProvider) tests get kickoff runs answered by `self.kickoff`, by default a
+        # one-line reply; ready providers such as DemoProvider handle kickoff runs themselves.
+        self.kickoff = provider_for(kickoff) if kickoff is not None else FakeProvider(lambda messages, tools: reply('Kickoff noted.'))
 
     async def start(self):
         services = Services(app=self.application, notebooks=self.notebooks, workspace=self.app.state.workspace,
                             mutation=self.mutation, notebook_service=lambda: self.app.state.notebook_service)
-        self.runtime = AgentRuntime(services, self.provider, poll_interval=0.02, **self.runtime_options)
+        provider = KickoffSplit(self.provider, self.kickoff) if isinstance(self.provider, FakeProvider) else self.provider
+        self.runtime = AgentRuntime(services, provider, poll_interval=0.02, **self.runtime_options)
         self.app.state.agent_runtime = self.runtime
         await self.runtime.start()
         return self

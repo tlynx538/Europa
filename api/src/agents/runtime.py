@@ -6,6 +6,7 @@ a refresh, a lost response or a restart never re-generates an approved action.
 """
 import asyncio
 from dataclasses import dataclass
+import hashlib
 import json
 import logging
 import time
@@ -17,13 +18,17 @@ from pydantic import ValidationError
 from application import models as m
 from application.store import ApplicationError
 from agents.context import assemble
+from agents.progress import TaskProgress, tracked
 from agents.policy import APPROVAL_TTL_SECONDS, MAX_CONCURRENT_RUNS, MAX_DELEGATION_DEPTH, ROLES, Budget, PolicyDenied, PolicyEngine
 from agents.providers import ProviderError
 from agents.schema import TERMINAL_RUN_STATES
 from agents.store import AgentStore, LostOwnership
-from agents.tools import REGISTRY, ToolContext, ToolError, _notebook_roadmap, _project_for, clip, digest
+from agents.tools import REGISTRY, ToolContext, ToolError, _notebook_roadmap, _project_for, clip, digest, output_text, receipt_view
 
 log = logging.getLogger(__name__)
+CELL_TOOLS = ('insert_code_cell', 'insert_markdown_cell', 'replace_cell_source', 'execute_cell')
+STALE_REASON = 'stale_revision'
+STALE_SUMMARY = 'The notebook changed since this was proposed. Re-read it and propose again.'
 SIDE_EFFECT_FREE = {'read'}
 
 
@@ -64,6 +69,8 @@ class AgentRuntime:
         self.tasks: dict[str, asyncio.Task] = {}
         self._wake = asyncio.Event()
         self._scheduler_task = None
+        self._assign_lock = asyncio.Lock()
+        self.progress = TaskProgress(self)
         self.closed = False
 
     # ------------------------------------------------------------------ lifecycle
@@ -155,69 +162,189 @@ class AgentRuntime:
         if created: self.wake()
         return run
 
+    def _kickoff_scope(self, notebook_id, conversation_id, origin_message_id):
+        app = self.services.app
+        with app.transaction():
+            canonical = app.db.execute('SELECT conversation_id FROM canonical_notebook_conversations WHERE notebook_id=?',
+                                       (notebook_id,)).fetchone()
+            if canonical is None or canonical['conversation_id'] != conversation_id:
+                raise ApplicationError('Kickoff conversation is not the notebook conversation', 409)
+            message = app._row(origin_message_id, 'message')
+            if message['parent_id'] != conversation_id:
+                raise ApplicationError('Origin message belongs to another conversation', 422)
+            membership = app.db.execute('SELECT project_id FROM memberships WHERE notebook_id=? AND associated=1',
+                                        (notebook_id,)).fetchone()
+        return membership['project_id'] if membership else None
+
+    async def start_kickoff(self, notebook_id, conversation_id, origin_message_id, purpose, *, operation_id):
+        """Internal, trusted path (never exposed over REST): start the Notebook Coordinator
+        kickoff run of a notebook that Home just created. Its trigger is the coordinator-authored
+        origin message, which REST start_run rejects. Replaying the operation ID is a no-op."""
+        project = await asyncio.to_thread(self._kickoff_scope, notebook_id, conversation_id, origin_message_id)
+        purpose = clip(purpose, 1000)
+        run, created = await asyncio.to_thread(
+            self.store.create_run, operation_id=operation_id,
+            payload={'kickoff': notebook_id, 'conversation': conversation_id, 'message': origin_message_id, 'purpose': purpose},
+            role='notebook_coordinator', conversation_id=conversation_id, trigger_message_id=origin_message_id,
+            notebook_id=notebook_id, project_id=project, parent_run_id=None, depth=0,
+            task={'kickoff': True, 'purpose': purpose}, provider=self.provider.name, model=self.provider.model,
+            budget=ROLES['notebook_coordinator'].budget.as_dict(), event={'kickoff': True})
+        if created: self.wake()
+        return run
+
+    async def _kickoff_after_create(self, run, lease, call, result, *, record=True):
+        """Start the kickoff run for a succeeded create_project_notebook call. Only results that
+        carry origin_message_id (Phase 4D and later) qualify. Failure never fails the Home run."""
+        data = (result or {}).get('data') or {}
+        if call['name'] != 'create_project_notebook' or not data.get('origin_message_id'):
+            return None
+        try:
+            return await self.start_kickoff(data['notebook_id'], data['conversation_id'], data['origin_message_id'],
+                                            (call.get('arguments') or {}).get('purpose') or '',
+                                            operation_id='agent-kickoff-' + call['id'])
+        except Exception as exc:
+            log.warning('Kickoff for notebook %s was not started (%s)', data.get('notebook_id'), type(exc).__name__)
+            if record:
+                try:
+                    await asyncio.to_thread(self.store.event, run['id'], 'kickoff_failed',
+                                            {'notebook_id': data.get('notebook_id'),
+                                             'error': clip(str(exc) or type(exc).__name__, 300)}, lease)
+                except LostOwnership:
+                    raise
+                except Exception:
+                    log.exception('Could not record kickoff failure')
+            return None
+
     async def decide(self, approval_id, *, operation_id, decision, digest_value):
+        if decision == 'repropose':
+            await asyncio.to_thread(self._require_stale, approval_id)
         approval, changed = await asyncio.to_thread(self.store.decide, approval_id, operation_id=operation_id,
                                                     decision=decision, digest_value=digest_value)
         if changed: self.wake()
         return approval
 
+    def _require_stale(self, approval_id):
+        """Re-propose (Phase 4D) is allowed only for a cell proposal whose bound notebook revision is
+        no longer the notebook's current revision; otherwise 409 and nothing changes."""
+        approval = self.store.approval(approval_id)
+        if approval['tool'] not in CELL_TOOLS or approval['revision'] is None or not approval['notebook_id']:
+            raise ApplicationError('Only notebook cell proposals can be re-proposed', 409)
+        current = self.services.notebooks.open(approval['notebook_id'])['metadata']['europa']['revision']
+        if current == approval['revision']:
+            raise ApplicationError('This proposal is still current; approve or deny it', 409)
+
     async def cancel(self, run_id):
         run = await asyncio.to_thread(self.store.request_cancel, run_id)
+        if run['state'] == 'cancelled':  # queued or waiting: settled here; a running run settles in its worker
+            await self._settle(run, 'cancelled')
         self.wake()
         return run
+
+    async def _settle(self, run, outcome, *, reason=None, message=None, report=''):
+        """Apply the roadmap row for a finished Coding Agent run (see agents.progress). Never raises."""
+        if not tracked(run): return
+        try:
+            if outcome == 'completed':
+                await asyncio.to_thread(self.progress.finished, run, message, report)
+            elif outcome == 'cancelled':
+                await asyncio.to_thread(self.progress.reset, run, 'the run was cancelled')
+            else:
+                await asyncio.to_thread(self.progress.blocked, run, reason or outcome)
+        except Exception as exc:
+            log.exception('Could not update roadmap progress for run %s', run['id'])
+            try:
+                await asyncio.to_thread(self.store.event, run['id'], 'task_update_failed', {'error': type(exc).__name__})
+            except Exception:
+                pass
 
     async def record_progress(self, ctx, partial):
         await asyncio.to_thread(self.store.merge_call_result, ctx.call_id, ctx.run['id'], ctx.run['_lease'], partial)
 
-    def _task_update(self, roadmap_id, task_id, operation_id, change):
-        app = self.services.app
-        for _ in range(3):
-            record = app.get(roadmap_id, 'roadmap')
-            task = next((t for t in record['data']['tasks'] if t['id'] == task_id), None)
-            if task is None: return None
-            raw = {k: task[k] for k in m.Task.model_fields}
-            change(raw)
-            try:
-                return app.roadmap_update(roadmap_id, m.TaskUpdate(operation_id=operation_id, revision=record['revision'],
-                                                                  task=m.Task.model_validate(raw)), True)
-            except ApplicationError as exc:
-                if exc.status_code != 409: raise
-        return None
+    # ------------------------------------------------------------------ Coding Agent assignment
+    # Two paths start a Coding Agent run, sharing assignable() and _start_coding():
+    # - the Notebook Coordinator's approved delegate_task: a child run (parent_run_id = the
+    #   coordinator run, depth 1) whose trigger is the coordinator run's trigger message;
+    # - the owner's "Assign to Coding Agent" (POST /agent/tasks/assign): a top-level run
+    #   (parent_run_id None) triggered by a system/tool message in the notebook conversation.
+    #   It still has depth 1, so policy keeps the Coding Agent unable to delegate, and the
+    #   UI renders its panel after that message like any other top-level run.
+    ASSIGNABLE = ('pending', 'blocked', 'needs_input')
 
-    async def delegate(self, parent, task_id, instructions, *, operation_id):
+    def assignable(self, notebook_id, task_id, roadmap_id=None):
+        """(roadmap, task) when `task_id` of this notebook's roadmap may start now; else ToolError."""
+        ctx = ToolContext(run={'notebook_id': notebook_id}, services=self.services)
+        project = _project_for(ctx)
+        if project is None: raise ToolError('This notebook is not in a project; assignment needs its roadmap', 'conflict')
+        roadmap = _notebook_roadmap(ctx, project)
+        if roadmap is None: raise ToolError('No roadmap exists for this notebook', 'conflict')
+        if roadmap_id is not None and roadmap['id'] != roadmap_id:
+            raise ToolError("That roadmap is not this notebook's current roadmap", 'conflict')
+        tasks = {t['id']: t for t in roadmap['data']['tasks']}
+        task = tasks.get(task_id)
+        if task is None: raise ToolError(f'Task {task_id} is not in the approved roadmap', 'conflict')
+        if task['status'] not in self.ASSIGNABLE:
+            raise ToolError(f"Task {task_id} is {task['status'].replace('_', ' ')}; only pending, blocked or needs-input tasks can be assigned", 'conflict')
+        blocking = [d for d in task['dependencies'] if tasks[d]['status'] != 'completed']
+        if blocking: raise ToolError(f"Task {task_id} depends on unfinished tasks: {', '.join(blocking)}", 'conflict')
+        active = self.store.active_child(notebook_id)
+        if active: raise ToolError(f'A Coding Agent run ({active[:8]}) is already active in this notebook', 'conflict')
+        return roadmap, task
+
+    async def _start_coding(self, *, operation_id, payload, notebook_id, roadmap_id, task_id, instructions, assigned_by,
+                            conversation_id, trigger_message, parent, roadmap_revision=None, before_create=None):
+        """Validate and create a Coding Agent run. Serialized, so two requests cannot both pass
+        the one-active-run rule. An exact replay of `operation_id` returns the same run."""
+        async with self._assign_lock:
+            existing = await asyncio.to_thread(self.store.run_by_operation, operation_id, payload)
+            if existing: return existing, False
+            roadmap, task = await asyncio.to_thread(self.assignable, notebook_id, task_id, roadmap_id)
+            if roadmap_revision is not None and roadmap['revision'] != roadmap_revision:
+                raise ToolError('The roadmap changed after this assignment was proposed; nothing was assigned', 'conflict')
+            trigger = trigger_message if before_create is None else await asyncio.to_thread(before_create, task)
+            brief = {'roadmap_id': roadmap['id'], 'task_id': task_id, 'title': task['title'],
+                     'acceptance_criteria': task['acceptance_criteria'], 'instructions': instructions, 'assigned_by': assigned_by}
+            run, created = await asyncio.to_thread(
+                self.store.create_run, operation_id=operation_id, payload=payload, role='coding_agent',
+                conversation_id=conversation_id, trigger_message_id=trigger, notebook_id=notebook_id,
+                project_id=roadmap['project_id'], parent_run_id=parent['id'] if parent else None, depth=1, task=brief,
+                provider=self.provider.name, model=self.provider.model, budget=ROLES['coding_agent'].budget.as_dict(),
+                event={'parent_run_id': parent['id'] if parent else None, 'task_id': task_id, 'assigned_by': assigned_by})
+        if created:
+            await asyncio.to_thread(self.progress.start, run)
+            self.wake()
+        return run, created
+
+    async def assign_task(self, *, operation_id, roadmap_id, task_id, instructions=None):
+        """Owner assignment (trusted REST path): post a system/tool message, then start a top-level run."""
+        app = self.services.app
+        record = await asyncio.to_thread(app.get, roadmap_id, 'roadmap')
+        notebook = record['notebook_id'] or record['data'].get('notebook_id')
+        if not notebook: raise ApplicationError('This roadmap is not bound to a notebook', 409)
+        conversation = (await asyncio.to_thread(app.ensure_notebook_conversation, notebook))['id']
+        text = (instructions or '').strip() or 'Complete the task and meet its acceptance criteria.'
+
+        def post(task):
+            message = app.message_append(conversation, m.MessageCreate(
+                operation_id='assign-' + hashlib.sha256(operation_id.encode()).hexdigest()[:40],
+                content=clip(f'Owner assigned "{task["title"]}" to the Coding Agent.', 4000)), author_role='system/tool')
+            return message['id']
+        try:
+            run, _ = await self._start_coding(
+                operation_id=operation_id, payload={'roadmap': roadmap_id, 'task': task_id, 'instructions': text, 'by': 'user'},
+                notebook_id=notebook, roadmap_id=roadmap_id, task_id=task_id, instructions=text, assigned_by='user',
+                conversation_id=conversation, trigger_message=None, parent=None, before_create=post)
+        except ToolError as exc:
+            raise ApplicationError(str(exc), 409 if exc.kind == 'conflict' else 422) from None
+        return run
+
+    async def delegate(self, parent, task_id, instructions, *, operation_id, roadmap_revision=None):
         if parent['depth'] + 1 > MAX_DELEGATION_DEPTH:
             raise ToolError('Delegation depth limit reached', 'policy')
-
-        def validate():
-            ctx = ToolContext(run=parent, services=self.services)
-            project = _project_for(ctx)
-            roadmap = _notebook_roadmap(ctx, project)
-            if roadmap is None: raise ToolError('No roadmap exists for this notebook', 'conflict')
-            tasks = {t['id']: t for t in roadmap['data']['tasks']}
-            task = tasks.get(task_id)
-            if task is None: raise ToolError(f'Task {task_id} is not in the approved roadmap', 'conflict')
-            if task['status'] in {'completed', 'cancelled'}: raise ToolError(f"Task {task_id} is {task['status']}", 'conflict')
-            blocking = [d for d in task['dependencies'] if tasks[d]['status'] != 'completed']
-            if blocking: raise ToolError(f"Task {task_id} depends on unfinished tasks: {', '.join(blocking)}", 'conflict')
-            active = self.store.active_child(parent['notebook_id'])
-            if active: raise ToolError(f'A Coding Agent run ({active[:8]}) is already active in this notebook', 'conflict')
-            return roadmap, task
-        roadmap, task = await asyncio.to_thread(validate)
-        brief = {'roadmap_id': roadmap['id'], 'task_id': task_id, 'title': task['title'],
-                 'acceptance_criteria': task['acceptance_criteria'], 'instructions': instructions}
-        child, created = await asyncio.to_thread(
-            self.store.create_run, operation_id=operation_id,
-            payload={'parent': parent['id'], 'task': task_id, 'instructions': instructions},
-            role='coding_agent', conversation_id=parent['conversation_id'], trigger_message_id=parent['trigger_message_id'],
-            notebook_id=parent['notebook_id'], project_id=parent['project_id'], parent_run_id=parent['id'],
-            depth=parent['depth'] + 1, task=brief, provider=self.provider.name, model=self.provider.model,
-            budget=ROLES['coding_agent'].budget.as_dict(), event={'parent_run_id': parent['id'], 'task_id': task_id})
-        if created:
-            def start(raw):
-                if raw['status'] in {'pending', 'blocked', 'needs_input'}:
-                    raw.update(status='in_progress', explanation=None)
-            await asyncio.to_thread(self._task_update, roadmap['id'], task_id, 'agent-start-' + child['id'], start)
-            self.wake()
+        child, created = await self._start_coding(
+            operation_id=operation_id, payload={'parent': parent['id'], 'task': task_id, 'instructions': instructions},
+            notebook_id=parent['notebook_id'], roadmap_id=None, task_id=task_id, instructions=instructions,
+            assigned_by='coordinator', conversation_id=parent['conversation_id'], trigger_message=parent['trigger_message_id'],
+            parent=parent, roadmap_revision=roadmap_revision)
         return child
 
     # ------------------------------------------------------------------ worker
@@ -251,20 +378,63 @@ class AgentRuntime:
                                     event=(event, {'error': message}))
         except LostOwnership:
             return
-        if run['role'] == 'coding_agent' and run.get('task'):
-            def block(raw):
-                if raw['status'] == 'in_progress':
-                    raw.update(status='blocked', explanation=clip(f'Coding Agent run failed: {message}', 2000))
-            try:
-                await asyncio.to_thread(self._task_update, run['task']['roadmap_id'], run['task']['task_id'], 'agent-blocked-' + run['id'], block)
-            except Exception:
-                log.exception('Could not mark task blocked')
+        await self._settle(run, 'failed', reason=f'run failed: {message}')
+
+    def _repair_violation(self, run_id, name, args):
+        """Repair rule: after a run of a cell whose receipt is applied with an error, the next
+        supervised actions must be replace_cell_source on that cell then execute_cell on it,
+        or an insert_markdown_cell note. Returns the rejection reason, or None."""
+        calls = self.store.tool_calls(run_id)
+        failed, index = None, -1
+        for i, c in enumerate(calls):
+            if c['name'] == 'execute_cell' and c['state'] == 'succeeded':
+                data = (c['result'] or {}).get('data') or {}
+                failed = data.get('cell_id') if data.get('state') == 'applied' and data.get('status') == 'error' else None
+                index = i
+        if failed is None: return None
+        expected = 'repair'
+        for c in calls[index + 1:]:
+            if c['state'] != 'succeeded': continue
+            if c['name'] == 'insert_markdown_cell': return None
+            if c['name'] == 'replace_cell_source' and c['binding']['cell_id'] == failed: expected = 'run'
+        if name == 'insert_markdown_cell': return None
+        if expected == 'repair' and name == 'replace_cell_source' and args.cell_id == failed: return None
+        if expected == 'run' and name in ('execute_cell', 'replace_cell_source') and args.cell_id == failed: return None
+        step = 'replace_cell_source on that cell' if expected == 'repair' else 'execute_cell on the repaired cell'
+        return (f'Cell {failed} failed when run. The next action must be {step}, or an insert_markdown_cell note '
+                'explaining the failure.')
+
+    def _coding_record(self, run):
+        """Harness-written execution facts for the report, taken only from receipts. Never model text."""
+        calls = [c for c in self.store.tool_calls(run['id']) if c['name'] == 'execute_cell']
+        settled = [c for c in calls if c['state'] in ('succeeded', 'failed', 'uncertain', 'denied', 'expired', 'cancelled')]
+        if not settled:
+            return 'Execution record: nothing ran (no run of a cell was approved).', None, None
+        last = settled[-1]
+        result = last['result'] or {}
+        execution = (result.get('links') or {}).get('execution_receipt_id') or result.get('execution_id')
+        if last['state'] != 'succeeded' or not execution:
+            why = {'denied': 'the run was denied', 'expired': 'the approval expired', 'cancelled': 'it was cancelled',
+                   'uncertain': 'its outcome is unknown and it was not retried'}.get(last['state'], result.get('summary') or last['state'])
+            return f'Execution record: nothing ran ({clip(why, 300)}).', None, None
+        try:
+            receipt = self.services.notebooks.execution(run['notebook_id'], execution)
+        except Exception:
+            return 'Execution record: the receipt could not be read; no output is claimed.', None, None
+        view = receipt_view(receipt)
+        if receipt['state'] != 'applied':
+            return f"Execution record: receipt {execution[:8]} is {receipt['state']}; no output is claimed.", execution, receipt['cell_id']
+        output = output_text((receipt.get('result') or {}).get('outputs'), 1500) or '(no output)'
+        return (f"Execution record: receipt {execution[:8]} applied, status {view['status']}.\nObserved output:\n{output}",
+                execution, receipt['cell_id'])
 
     def _trigger_text(self, run):
         if run['role'] == 'coding_agent':
             task = run['task']
             return (f"Task {task['task_id']}: {task['title']}\nAcceptance criteria:\n- " + '\n- '.join(task['acceptance_criteria'])
                     + f"\n\nInstructions: {task['instructions']}")
+        if (run.get('task') or {}).get('kickoff'):
+            return f"Kickoff for a new notebook. Owner's purpose: {run['task']['purpose']}"
         message = self.services.app.get(run['trigger_message_id'], 'message')
         text = message['data']['content']
         if message['data'].get('cell_id'):
@@ -342,6 +512,7 @@ class AgentRuntime:
             return False
         await asyncio.to_thread(self.store.finish, run['id'], lease, 'cancelled', usage=snapshot(),
             event=('run_cancelled', {'note': 'Stopped before further agent work. Committed edits or executions are not undone.'}))
+        await self._settle(run, 'cancelled')
         return True
 
     async def _record(self, run, lease, step_idx, call, name, state, result, **extra):
@@ -365,6 +536,9 @@ class AgentRuntime:
                 verb = {'denied': 'denied by the owner', 'expired': 'expired before an owner decision',
                         'cancelled': 'cancelled'}[state]
                 result = {'status': state, 'summary': f'The proposed {existing["name"]} was {verb}. Nothing was changed.'}
+                if (existing['result'] or {}).get('reason') == STALE_REASON:
+                    # Owner chose Re-propose on a stale card: a conflict to react to, not a refusal.
+                    result = {'status': 'conflict', 'summary': STALE_SUMMARY, 'reason': STALE_REASON}
                 await asyncio.to_thread(self.store.set_call, existing['id'], run['id'], lease, state=state, result=result,
                                         event=('tool_result', {'tool': existing['name'], **_public(result)}))
                 await asyncio.to_thread(self.store.add_step, run['id'], lease, 'tool', {'tool_call_id': call['id'], 'content': _model_content(result)})
@@ -382,6 +556,14 @@ class AgentRuntime:
             await self._record(run, lease, step_idx, call, call['name'][:64] or 'unknown', 'rejected',
                                {'status': 'policy', 'summary': f'Not permitted: {exc}'})
             return 'done'
+        if tool.per_run is not None:
+            earlier = [c for c in await asyncio.to_thread(self.store.tool_calls, run['id'])
+                       if c['name'] == tool.name and c['state'] not in {'rejected', 'failed'}]
+            if len(earlier) >= tool.per_run:
+                await self._record(run, lease, step_idx, call, tool.name, 'rejected',
+                                   {'status': 'policy', 'summary': f'{tool.name} may be used at most {tool.per_run} time(s) per run; '
+                                                                   'wait for the owner to answer.'}, version=tool.version)
+                return 'done'
         try:
             raw = json.loads(call['arguments'] or '{}')
             if not isinstance(raw, dict): raise ValueError('arguments must be an object')
@@ -405,6 +587,12 @@ class AgentRuntime:
                                    {'status': 'policy', 'summary': 'Repair budget exhausted. Stop and report the failure to the Coordinator.'},
                                    version=tool.version, arguments=arguments)
                 return 'done'
+            if run['role'] == 'coding_agent':
+                reason = await asyncio.to_thread(self._repair_violation, run['id'], tool.name, args)
+                if reason:
+                    await self._record(run, lease, step_idx, call, tool.name, 'rejected', {'status': 'policy', 'summary': reason},
+                                       version=tool.version, arguments=arguments)
+                    return 'done'
             try:
                 binding = await tool.bind(ctx, args)
             except ToolError as exc:
@@ -454,6 +642,10 @@ class AgentRuntime:
         result = {**{k: v for k, v in partial.items() if k == 'execution_id'}, **result}
         await asyncio.to_thread(self.store.set_call, call['id'], run['id'], lease, state=state, result=result,
                                 event=('tool_result', {'tool': tool.name, **_public(result)}))
+        if state == 'succeeded':
+            # After the durable 'succeeded' state, never from inside the tool. A crash
+            # before this point is covered by the recovery sweep (same operation ID).
+            await self._kickoff_after_create(run, lease, call, result)
         await asyncio.to_thread(self.store.add_step, run['id'], lease, 'tool',
                                 {'tool_call_id': call['provider_call_id'], 'content': _model_content(result)})
 
@@ -470,8 +662,10 @@ class AgentRuntime:
         if run['role'] == 'home_coordinator' and links.get('notebook_id'):
             message_links['notebook_id'] = links['notebook_id']
         if run['role'] == 'coding_agent':
-            if links.get('execution_receipt_id'):
-                message_links.update(execution_receipt_id=links['execution_receipt_id'], cell_id=links.get('cell_id'))
+            record, receipt_id, receipt_cell = await asyncio.to_thread(self._coding_record, run)
+            content = f'{content}\n\n{record}'
+            if receipt_id:
+                message_links.update(execution_receipt_id=receipt_id, cell_id=receipt_cell)
             elif links.get('cell_id'):
                 message_links['cell_id'] = links['cell_id']
         if run['role'] == 'coding_agent' and run.get('task'): message_links['task_id'] = run['task']['task_id']
@@ -486,18 +680,9 @@ class AgentRuntime:
                 return self.services.app.message_append(run['conversation_id'], m.MessageCreate(
                     operation_id='agent-reply-plain-' + run['id'], content=clip(content, 30000)), author_role=role.author)
         message = await asyncio.to_thread(post)
-        if run['role'] == 'coding_agent' and run.get('task'):
-            summary = clip(f'Coding Agent report: {content}', 1900)
-            receipt = links.get('execution_receipt_id')
-
-            def evidence(raw):
-                if len(raw['evidence']) < 32:
-                    raw['evidence'].append({'summary': summary, 'message_id': message['id'],
-                                            'execution_receipt_id': receipt})
-            try:
-                await asyncio.to_thread(self._task_update, run['task']['roadmap_id'], run['task']['task_id'], 'agent-evidence-' + run['id'], evidence)
-            except Exception:
-                log.exception('Could not record task evidence')
+        # One task write per finished run (replaces the former agent-evidence-<run> append): a verified
+        # completion carries the evidence; otherwise the report is kept as unverified evidence.
+        await self._settle(run, 'completed', message=message, report=content)
         await asyncio.to_thread(self.store.finish, run['id'], lease, 'completed', usage=usage,
                                 result={'message_id': message['id'], 'links': message_links},
                                 event=('reply_posted', {'message_id': message['id'], 'author': role.author}))
@@ -529,16 +714,27 @@ class AgentRuntime:
                 result = {'status': (result or {}).get('status', 'ok' if state == 'succeeded' else state), **(result or {})}
                 await asyncio.to_thread(self.store.set_call, call['id'], run['id'], lease, state=state, result=result,
                                         event=('tool_reconciled', {'tool': call['name'], 'outcome': state, **_public(result)}))
+                if state == 'succeeded':
+                    await self._kickoff_after_create(run, lease, call, result)
                 await asyncio.to_thread(self.store.add_step, run['id'], lease, 'tool',
                                         {'tool_call_id': call['provider_call_id'], 'content': _model_content(result)})
                 if state == 'uncertain': uncertain.append(call['name'])
             if run['cancel_requested']:
                 await asyncio.to_thread(self.store.finish, run['id'], lease, 'cancelled',
                                         event=('run_cancelled', {'note': 'Cancelled during restart recovery.'}))
+                await self._settle(run, 'cancelled')
             elif uncertain:
                 await asyncio.to_thread(self.store.finish, run['id'], lease, 'interrupted', error='Uncertain side effect after restart',
                                         event=('run_interrupted', {'reason': 'A side effect could not be verified after restart; it was not retried.',
                                                                    'tools': uncertain}))
+                await self._settle(run, 'interrupted', reason='interrupted by a server restart; the outcome of '
+                                   + ', '.join(uncertain) + ' could not be verified and was not retried')
             else:
                 await asyncio.to_thread(self.store.update, run['id'], lease, state='queued', owner=None,
                                         event=('run_recovered', {'note': 'Resumed after server restart from persisted steps.'}))
+        # A crash after a create call reached 'succeeded' but before its kickoff started leaves
+        # no other trace: start any missing kickoff. The operation ID makes this exactly-once,
+        # and creations from before Phase 4D (no origin_message_id) never get a kickoff.
+        for call in await asyncio.to_thread(self.store.tool_calls, None, 'succeeded'):
+            if call['name'] == 'create_project_notebook':
+                await self._kickoff_after_create({'id': call['run_id']}, None, call, call['result'], record=False)

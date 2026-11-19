@@ -240,10 +240,22 @@ open notebook. Owner messages then also start a Notebook Coordinator run in the 
 existing conversation. It reads this notebook, its project and its roadmap, discusses them,
 and can propose or revise the notebook's roadmap. Nothing is saved without an approval bound
 to the exact plan and roadmap revision, and a roadmap edited meanwhile is a conflict, never
-an overwrite. It cannot assign work, edit cells, run code or read other notebooks until
-Phase 4D, and task completion stays an owner action. See
-[Notebook Coordinator](docs/phase4c-notebook-coordinator.md) and
+an overwrite. It never edits cells or runs code itself and never reads other notebooks.
+See [Notebook Coordinator](docs/phase4c-notebook-coordinator.md) and
 [Phase 4C validation](docs/phase4c-validation.md).
+
+## Coding Agent (Phase 4D)
+
+With agents enabled, a notebook created from Home opens with the Coordinator's kickoff
+questions ("Needs your input") and, in a project, a draft roadmap to approve. Each ready
+roadmap task has **Assign to Coding Agent**; the Coordinator may also propose an assignment,
+which needs approval. The Coding Agent proposes cells and runs only after separate owner
+approvals, runs only cells it wrote, executes through the normal receipt path with a
+deterministic execution ID (never re-run after a lost acknowledgement or restart), repairs
+within a bounded rule, and reports output quoted only from the receipt. A task is completed
+automatically, attributed to `coding_agent`, only when a receipt (or, for notes, every edit)
+verifies the work; the owner can reopen it. See
+[Coding Agent](docs/phase4d-coding-agent.md) and [Phase 4D validation](docs/phase4d-validation.md).
 
 ## API overview
 
@@ -261,7 +273,8 @@ Major API groups:
 - `/api/comments` — cell comment threads
 - `/api/runtime` — runtime status, provisioning, cleanup, and diagnostics
 - `/api/kernel` — low-level Gateway-compatible kernel operations
-- `/api/agent` — agent status, Home conversation, runs, events, cancellation and approvals
+- `/api/agent` — agent status, Home conversation, runs, events, cancellation, approvals
+  (approve, deny, or re-propose a stale card) and owner task assignment (`POST /api/agent/tasks/assign`)
   (503 unless an agent provider is configured, except `/api/agent/status`)
 - `GET /health` (top level, also `HEAD`) — side-effect-free liveness: 200 with
   `{"status":"ok","api":"ok","gateway":"stopped|starting|running|stopping|failed|unreachable","agents":"running|disabled"}`;
@@ -314,7 +327,7 @@ cd web
 npm run test:browser
 ```
 
-The Home and Notebook Coordinator journeys use a separate config with the demo provider on port 18400:
+The Home Coordinator, Notebook Coordinator and Coding Agent journeys use a separate config with the demo provider and a real local Gateway on port 18400:
 
 ```sh
 cd web
@@ -335,6 +348,8 @@ Containerd tests require approved Linux infrastructure and explicit
   [validation](docs/phase4b-validation.md)
 - [Phase 4C Notebook Coordinator](docs/phase4c-notebook-coordinator.md) and
   [validation](docs/phase4c-validation.md)
+- [Phase 4D Coding Agent](docs/phase4d-coding-agent.md) and
+  [validation](docs/phase4d-validation.md)
 - [Notebook persistence](docs/notebook-persistence.md)
 - [Projects and conversations](docs/conversational-notebooks.md)
 - [Runtime architecture](docs/runtime-provider.md)

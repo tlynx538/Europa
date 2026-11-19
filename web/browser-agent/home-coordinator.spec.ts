@@ -104,6 +104,11 @@ test('create: Markov chain proposal, approval, Files refresh, open notebook, ret
   const origin = page.locator('article.message', { hasText: 'Notebook created from a Home conversation' })
   await expect(origin).toBeVisible()
   await expect(origin).toContainText('Purpose: Owner objective: I want to understand a simple Markov chain.')
+  // Phase 4D: the kickoff run asks about the Home purpose and drafts a plan in the new notebook.
+  const questions = page.locator('article.message[data-author="coordinator"]', { has: page.locator('.needs-input-badge') })
+  await expect(questions.locator('.needs-input-badge')).toHaveText('Needs your input')
+  await expect(questions).toContainText('1. What do you want to achieve with the Markov chain')
+  await expect(page.getByRole('region', { name: 'Approval: Create roadmap' })).toBeVisible()
   await capture(page, 'notebook-origin')
 
   await page.getByRole('link', { name: 'Europa', exact: true }).click()

@@ -28,10 +28,10 @@ export function clearSentDraft(notebook: string, conversation: string, content: 
   }
 }
 
-export function ConversationComposer({ notebookId, conversationId, cells, drafts, conflict, revision, selectedCell, reference, reply, onReplyConsumed, onReferenceRemoved, busy, pending, onSend }: {
+export function ConversationComposer({ notebookId, conversationId, cells, drafts, conflict, revision, selectedCell, reference, reply, onReplyConsumed, onReferenceRemoved, busy, pending, onSend, placeholder = 'Write a message...' }: {
   notebookId: string; conversationId: string; cells: { id: string; source: string }[]; drafts: string[]; conflict: boolean; revision?: number; selectedCell?: string
   reference: CellReference | null; reply: string | null; onReplyConsumed: () => void; onReferenceRemoved?: () => void; busy: boolean; pending: boolean
-  onSend: (body: object, content: string) => Promise<boolean>
+  onSend: (body: object, content: string) => Promise<boolean>; placeholder?: string
 }) {
   const key = draftKey(notebookId, conversationId)
   const [draft, setDraft] = useState(() => recover(notebookId, conversationId))
@@ -56,6 +56,6 @@ export function ConversationComposer({ notebookId, conversationId, cells, drafts
       {draft.reply && <span>Reply to <a href={`#message-${draft.reply}`}>{draft.reply.slice(0, 8)}</a> <button type="button" onClick={() => { set({ ...draft, reply: null }); onReplyConsumed() }}>Cancel reply</button></span>}
     </div>
     {invalid && <p role="alert" className="alert">Cell reference is missing, changed, or has an unsaved/conflicted draft. Save and review the cell, or remove the reference before sending.</p>}
-    <label htmlFor="conversation-message" className="visually-hidden">Message</label><div className="composer-input"><textarea id="conversation-message" placeholder="Write a message..." required maxLength={32000} value={draft.content} onChange={event => set({ ...draft, content: event.target.value })} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} /><button aria-label="Send" title="Send" disabled={busy || pending || invalid || !draft.content.trim()}>➤</button></div><details className="composer-options"><summary>Options</summary><label><input type="checkbox" checked={draft.needsInput} onChange={event => set({ ...draft, needsInput: event.target.checked })} />Needs input</label></details>
+    <label htmlFor="conversation-message" className="visually-hidden">Message</label><div className="composer-input"><textarea id="conversation-message" placeholder={placeholder} required maxLength={32000} value={draft.content} onChange={event => set({ ...draft, content: event.target.value })} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} /><button aria-label="Send" title="Send" disabled={busy || pending || invalid || !draft.content.trim()}>➤</button></div><details className="composer-options"><summary>Options</summary><label><input type="checkbox" checked={draft.needsInput} onChange={event => set({ ...draft, needsInput: event.target.checked })} />Needs input</label></details>
   </form>
 }

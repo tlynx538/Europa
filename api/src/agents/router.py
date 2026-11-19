@@ -26,12 +26,19 @@ class StartRun(Body):
 
 class Decision(Body):
     operation_id: OperationId
-    decision: Literal['approve', 'deny']
+    decision: Literal['approve', 'deny', 'repropose']
     digest: str = Field(pattern=r'^[a-f0-9]{64}$')
 
 
 class Operation(Body):
     operation_id: OperationId
+
+
+class Assign(Body):
+    operation_id: OperationId
+    roadmap_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    task_id: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,64}$')
+    instructions: str | None = Field(default=None, max_length=4000)
 
 
 def runtime(request):
@@ -45,10 +52,13 @@ def view(store, run, *, detail=True):
     public = {key: run[key] for key in ('id', 'role', 'state', 'conversation_id', 'trigger_message_id', 'notebook_id',
                                         'project_id', 'parent_run_id', 'depth', 'provider', 'model', 'budget', 'usage',
                                         'error', 'result', 'created_at', 'updated_at', 'started_at', 'finished_at')}
-    public['task'] = None if run['task'] is None else {k: run['task'][k] for k in ('roadmap_id', 'task_id', 'title')}
+    task = run['task']
+    # A kickoff run's task holds the Home purpose; only the kickoff flag is public.
+    public['task'] = None if task is None else {'kickoff': True} if task.get('kickoff') else {
+        k: task.get(k) for k in ('roadmap_id', 'task_id', 'title', 'assigned_by')}
     if detail:
-        public['approvals'] = [{key: a[key] for key in ('id', 'tool', 'state', 'digest', 'preview', 'revision',
-                                                         'created_at', 'expires_at', 'decided_at')}
+        public['approvals'] = [{key: a.get(key) for key in ('id', 'tool', 'state', 'digest', 'preview', 'revision',
+                                                             'created_at', 'expires_at', 'decided_at', 'reason')}
                                for a in store.approvals(run['id'])]
         public['tool_calls'] = [{'id': c['id'], 'name': c['name'], 'state': c['state'],
                                  'summary': (c['result'] or {}).get('summary'), 'status': (c['result'] or {}).get('status'),
@@ -89,6 +99,16 @@ async def new_home_conversation(request: Request, body: Operation):
 async def start_run(request: Request, body: StartRun):
     rt = runtime(request)
     run = await rt.start_run(operation_id=body.operation_id, conversation_id=body.conversation_id, message_id=body.message_id)
+    return await asyncio.to_thread(view, rt.store, run)
+
+
+@router.post('/tasks/assign', status_code=201)
+async def assign_task(request: Request, body: Assign):
+    """Owner assignment of one roadmap task to the Coding Agent. The server checks the same
+    readiness rules as an approved Coordinator delegation; an exact replay returns the same run."""
+    rt = runtime(request)
+    run = await rt.assign_task(operation_id=body.operation_id, roadmap_id=body.roadmap_id, task_id=body.task_id,
+                               instructions=body.instructions)
     return await asyncio.to_thread(view, rt.store, run)
 
 
