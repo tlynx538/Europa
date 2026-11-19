@@ -189,8 +189,21 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
   }
   const feedMessages = agentFeed.conversation === conversation?.id ? agentFeed.messages : []
   const displayedMessages = [...messages, ...feedMessages.filter(item=>!messages.some(message=>message.id===item.id))].sort((a,b)=>(a.sequence??a.created_at)-(b.sequence??b.created_at))
+  const agentNotebook = { revision, cells, editing: draftCells.length>0 || conflict }
+  const activityMessage = (run: typeof agentRuns[number]) =>
+    (run.parent_id ? agentRuns.find(parent=>parent.id===run.parent_id) : run)?.messages.find(link=>link.purpose==='user')?.message_id
+  const requestCoding = (roadmap: RecordData<Roadmap>, task: Task) => void run(async () => {
+    await change('/agents/runs','POST',{
+      scope:{kind:'notebook',resource_id:notebookId},mode:'coordinate',
+      content:'Assign the approved task “'+task.title+'” to the Coding Agent.',
+      assignment:{roadmap_id:roadmap.id,roadmap_revision:roadmap.revision,task_id:task.id},
+      budgets:{requests:10}
+    })
+    agentFeed.reload()
+    if(panels.mobile)panels.setLeft(false)
+  },false)
   const projection = projectConversation(notebookId ?? '', project?.id ?? '', cells.map(c => c.id), conversation ?? undefined, displayedMessages, member ? comments : [])
-  const messageView = (m: RecordData<Message>, scope?: string) => <article data-author={m.data.author_role} className={`message ${m.data.parent_id ? 'reply' : ''}`} id={`message-${m.id}`} key={m.id}><div className="message-meta"><strong>{m.data.author_role}{m.data.state === 'needs_input' ? ' · Needs input' : ''}</strong><time dateTime={new Date(m.created_at * 1000).toISOString()} title={new Date(m.created_at * 1000).toLocaleString()}>{new Date(m.created_at * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></div>{scope && <small>{scope}</small>}{m.data.cell_id && <small>{cellLabel(m.data.cell_id)} reference{!cells.some(c => c.id === m.data.cell_id) ? ' · historical missing cell' : ''}</small>}{m.data.parent_id && <a href={`#message-${m.data.parent_id}`}>In reply to message</a>}<p>{m.data.content}</p><button onClick={() => setReply(m.id)}>Reply to message</button>{agentRuns.filter(run=>run.messages.some(link=>link.purpose==='user'&&link.message_id===m.id)).map(run=><AgentActivity key={run.id} run={run} onChange={agentFeed.reload}/>)}</article>
+  const messageView = (m: RecordData<Message>, scope?: string) => <article data-author={m.data.author_role} className={`message ${m.data.parent_id ? 'reply' : ''}`} id={`message-${m.id}`} key={m.id}><div className="message-meta"><strong>{m.data.author_role}{m.data.state === 'needs_input' ? ' · Needs input' : ''}</strong><time dateTime={new Date(m.created_at * 1000).toISOString()} title={new Date(m.created_at * 1000).toLocaleString()}>{new Date(m.created_at * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></div>{scope && <small>{scope}</small>}{m.data.cell_id && <small>{cellLabel(m.data.cell_id)} reference{!cells.some(c => c.id === m.data.cell_id) ? ' · historical missing cell' : ''}</small>}{m.data.parent_id && <a href={`#message-${m.data.parent_id}`}>In reply to message</a>}<p>{m.data.content}</p><button onClick={() => setReply(m.id)}>Reply to message</button>{agentRuns.filter(run=>activityMessage(run)===m.id).map(run=><AgentActivity key={run.id} run={run} notebook={agentNotebook} onChange={agentFeed.reload}/>)}</article>
   const commentMeta = (record: RecordData<Comment>) => <div className="message-meta"><strong>{record.data.author_role}</strong><time dateTime={new Date(record.created_at * 1000).toISOString()} title={new Date(record.created_at * 1000).toLocaleString()}>{new Date(record.created_at * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></div>
   const commentView = (root: RecordData<Comment>) => <article className="message cell-comment" tabIndex={-1} data-comment-cell={root.data.cell_id} key={root.id}>
     <div className="comment-anchor"><button disabled={root.data.anchor_status === 'orphaned' || !cells.some(c => c.id === root.data.cell_id)} onClick={() => void jump(notebookId, root.data.cell_id)}>{cellLabel(root.data.cell_id)} · <span className={`badge ${root.data.anchor_status}`}>{root.data.anchor_status === 'orphaned' ? 'Missing cell' : root.data.anchor_status}</span></button>{commentMeta(root)}</div><p>{root.data.content}</p>
@@ -209,7 +222,7 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
       {projection.general.map(m => messageView(m))}
       {projection.orphanMessages.map(m => messageView(m, 'Missing cell reference · historical message'))}
       {projection.orphanPlacement.map(m => messageView(m, 'Missing placement cell · historical message'))}
-      {agentRuns.filter(run=>!run.messages.some(link=>link.purpose==='user'&&displayedMessages.some(message=>message.id===link.message_id))).map(run=><AgentActivity key={run.id} run={run} onChange={agentFeed.reload}/>)}
+      {agentRuns.filter(run=>!displayedMessages.some(message=>message.id===activityMessage(run))).map(run=><AgentActivity key={run.id} run={run} notebook={agentNotebook} onChange={agentFeed.reload}/>)}
       {agentFeed.error&&<p role="alert" className="alert">{agentFeed.error} <button onClick={agentFeed.reload}>Refresh agent activity</button></p>}
       {projection.orphanComments.length > 0 && <section aria-label="Comments on missing cells"><h3>Comments on missing cells</h3>{projection.orphanComments.map(commentView)}</section>}
       {legacy.length > 0 && <section className="legacy-history" aria-label="Historical notebook conversations"><h3>Historical notebook conversations · read-only</h3>{legacy.map(({ conversation: thread, messages: history }) => <div key={thread.id}><h4>{thread.data.title} · {thread.id}</h4>{history.filter(m => (!m.notebook_id || m.notebook_id === notebookId) && (!m.data.notebook_id || m.data.notebook_id === notebookId)).map(m => <article className="message" data-author={m.data.author_role} key={m.id}><strong>{m.data.author_role}</strong><small> · {m.id}</small>{m.data.cell_id && <small> · {cellLabel(m.data.cell_id)}{!cells.some(c => c.id === m.data.cell_id) ? ' · Missing cell reference' : ''}</small>}<p>{m.data.content}</p></article>)}</div>)}</section>}
@@ -237,6 +250,9 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
          {roadmaps.map(r => <section className="roadmap" key={r.id}><div className="roadmap-title"><h3>{r.data.objective}</h3><strong>{r.data.progress}%</strong></div><div className="progress-label">{r.data.overall_display?.label ?? 'Overall progress'}</div><progress aria-label="Overall project progress" max="100" value={r.data.progress} />
            <h3>Tasks</h3><ol>{r.data.tasks.map((task, index) => <li className={`task ${task.display.compact ? 'compact' : ''} ${task.status}`} key={task.id}>
              <button onClick={() => { setTaskFilter(task.id); void jump(task.links.notebook_id, task.links.cell_id) }}>{task.display.checkmark ? '✓ ' : ''}{task.title}</button><span className={`task-state ${task.status}`}>{task.status === 'pending' ? 'upcoming' : task.status === 'in_progress' ? 'current' : task.status.replace('_', ' ')}</span>
+             {r.notebook_id===notebookId&&r.data.agent_approved&&agentFeed.config?.supports_tools&&
+                ['pending','in_progress'].includes(task.status)&&task.dependencies.every(id=>r.data.tasks.some(t=>t.id===id&&t.status==='completed'))&&
+                <button disabled={busy||pending} onClick={()=>requestCoding(r,task)}>Assign to Coding Agent</button>}
              {task.display.show_progress && task.status === 'in_progress' && <><span className="task-percent">{task.progress}%</span><progress aria-label={`${task.title} progress`} max="100" value={task.progress} /></>}
             {task.explanation && <p>{task.explanation}</p>}
             <details><summary>Task details</summary><ul>{task.acceptance_criteria.map((c, i) => <li key={i}>{c}</li>)}</ul>{task.evidence.map((e, i) => <p key={i}>{e.summary}</p>)}

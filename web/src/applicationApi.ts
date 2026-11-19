@@ -5,7 +5,7 @@ export interface Links { notebook_id?: string | null; cell_id?: string | null; t
 export type TaskStatus = 'pending' | 'in_progress' | 'blocked' | 'needs_input' | 'completed' | 'cancelled'
 export interface Task { id: string; title: string; acceptance_criteria: string[]; parent_id: string | null; dependencies: string[]; status: TaskStatus; explanation: string | null; weight: number; links: Links; evidence: { summary: string; message_id?: string | null; execution_receipt_id?: string | null }[]; accepted: boolean }
 export interface TaskView extends Task { progress: number; display: { compact: boolean; checkmark: boolean; show_progress: boolean }; accepted_by?: string | null }
-export interface Roadmap { objective: string; tasks: TaskView[]; progress: number; overall_display: { label: string; percentage_position: string } }
+export interface Roadmap { objective: string; tasks: TaskView[]; progress: number; agent_approved?: boolean; overall_display: { label: string; percentage_position: string } }
 export interface Project { title: string; status: string; notebooks: { notebook_id: string; present: boolean }[] }
 export interface Conversation { title: string }
 export interface Message extends Links { content: string; parent_id: string | null; state: string; author_role: string; placement_after_cell_id?: string | null }

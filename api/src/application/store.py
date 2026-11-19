@@ -596,6 +596,13 @@ class ApplicationStore:
         self.db.execute('INSERT INTO versions VALUES (?,?,?,?)',
             (record['id'], record['revision'], record['updated_at'], self._row(record['id'])['data']))
 
+    def agent_approved_roadmap(self, roadmap, revision, notebook):
+        return self.db.execute("""SELECT 1 FROM canonical_notebook_conversations c
+            JOIN agent_runs r ON r.conversation_id=c.conversation_id JOIN agent_calls a ON a.run_id=r.id
+            WHERE c.notebook_id=? AND a.tool='save_notebook_plan' AND a.state='completed'
+            AND json_extract(result,'$.data.roadmap_id')=? AND json_extract(result,'$.data.revision')=?
+            AND json_extract(result,'$.provenance.notebook_id')=? LIMIT 1""", (notebook,roadmap,revision,notebook)).fetchone() is not None
+
     def roadmap_create(self, body):
         def work():
             self._scope(body.project_id, body.notebook_id)
@@ -715,6 +722,7 @@ class ApplicationStore:
         elif row['kind'] == 'roadmap':
             data['progress'] = self._progress(data['tasks'])
             data['overall_display'] = {'label': 'Overall progress', 'percentage_position': 'right'}
+            if self.agent_approved_roadmap(row['id'],row['revision'],row['notebook_id']): data['agent_approved'] = True
         elif row['kind'] == 'comment':
             try:
                 cell = self.notebooks.cell(self.notebooks.open(row['notebook_id']), data['cell_id'])

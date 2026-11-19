@@ -9,7 +9,7 @@ import uuid
 
 from application.models import MessageCreate
 from application.store import ApplicationError, encoded
-from agents.models import Scope
+from agents.models import Budgets, Scope
 from notebooks.store import NotebookError
 from workspace.browser import WorkspaceError
 
@@ -20,7 +20,7 @@ TRANSITIONS = {
     'waiting_for_approval': {'queued', 'cancelled', 'failed'},
     'cancelling': {'cancelled', 'needs_reconciliation'},
     'interrupted': {'queued', 'cancelled'},
-    'needs_reconciliation': set(), 'completed': set(), 'failed': set(), 'cancelled': set(),
+    'needs_reconciliation': {'failed'}, 'completed': set(), 'failed': set(), 'cancelled': set(),
 }
 LEASE_SECONDS = 30
 MAX_ACTIVE = 8
@@ -161,7 +161,7 @@ class AgentStore:
 
     def create(self, body, provider):
         # Preserve exact v7 replay identity for the original read-only contract.
-        omitted = {key for key in ('cell_id','document_revision','parent_id') if getattr(body,key) is None}
+        omitted = {key for key in ('cell_id','document_revision','parent_id','assignment') if getattr(body,key) is None}
         if body.mode == 'discuss': omitted.add('mode')
         payload = body.model_dump(exclude=omitted)
         with self.app.mutex:
@@ -177,7 +177,12 @@ class AgentStore:
                 grant = self._grant(body.scope, body.authorized_notebooks)
                 if body.mode == 'coordinate' and body.scope.kind == 'workspace':
                     grant['capabilities'].append('workspace.create')
-                if body.mode == 'coordinate' and body.scope.kind == 'notebook' and grant['project_id']:
+                if body.assignment:
+                    if not grant['project_id']: raise AgentFault('Coding tasks require an active project', 403)
+                    assigned = body.assignment.model_dump()
+                    self.task_current(grant['project_id'], body.scope.resource_id, assigned)
+                    grant.update(assignment=assigned, capabilities=['read','coding.delegate','coding.edit','coding.execute'])
+                elif body.mode == 'coordinate' and body.scope.kind == 'notebook' and grant['project_id']:
                     grant['capabilities'].append('roadmap.plan')
                 run, now = identity(), time.time()
                 self.db.execute('''INSERT INTO agent_runs(id,conversation_id,role,scope,grant_json,budgets,provider,model,state,created_at,updated_at,deadline)
@@ -313,6 +318,22 @@ class AgentStore:
                 raise AgentFault('Duplicate model tool-call identifier', 409)
             if self.redactor.value(arguments) != arguments or self.redactor.text(call.id) != call.id:
                 raise AgentFault('Tool proposal contains a credential', 403)
+            if tool.name == 'apply_cell_edit':
+                previous = self.db.execute("SELECT result FROM agent_calls WHERE run_id=? AND tool='execute_approved_cell' AND state='completed' ORDER BY turn_number DESC LIMIT 1", (run,)).fetchone()
+                if previous:
+                    outcome = json.loads(previous['result'])['data']
+                    if outcome['status']!='error' or outcome['state']!='applied' or arguments['action']!='replace' or arguments['cell_id']!=outcome['cell_id']:
+                        raise AgentFault('A repair must target the cell of an applied error receipt',409)
+                    if row['repairs']>=row['budgets']['repairs']:
+                        raise AgentFault('Coding repair budget exhausted',409)
+                    self.db.execute('UPDATE agent_runs SET repairs=repairs+1 WHERE id=?',(run,))
+            if tool.name == 'execute_approved_cell':
+                latest = self.db.execute("SELECT tool,result FROM agent_calls WHERE run_id=? AND tool IN ('apply_cell_edit','execute_approved_cell') ORDER BY turn_number DESC LIMIT 1",(run,)).fetchone()
+                if not latest or latest['tool']!='apply_cell_edit' or not latest['result']:
+                    raise AgentFault('A new approved and committed cell edit is required before execution',409)
+                saved = json.loads(latest['result'])['data']
+                if saved['cell_type']!='code' or any(arguments[key]!=saved[key] for key in ('cell_id','revision','source_hash')):
+                    raise AgentFault('Execution does not match the approved saved code',409)
             key, op, now = identity(), 'agent-' + identity(), time.time()
             fingerprint = digest([run, tool.name, tool.version, target, arguments])
             self.db.execute('''INSERT INTO agent_calls(id,run_id,call_id,turn_number,tool,version,classification,arguments,digest,target,operation_id,state,created_at,updated_at)
@@ -434,6 +455,71 @@ class AgentStore:
             self.app._project(project)
             if row['scope']['kind'] == 'notebook': self.app._scope(project, row['scope']['resource_id'])
         if row['scope']['kind'] == 'notebook': return self.app._notebook_scope(row['scope']['resource_id'])
+
+    def task_current(self, project, notebook, assignment):
+        self.app._scope(project, notebook)
+        roadmap = self.app._row(assignment['roadmap_id'], 'roadmap')
+        if (roadmap['project_id'], roadmap['notebook_id'], roadmap['revision']) != (project, notebook, assignment['roadmap_revision']):
+            raise AgentFault('Assigned roadmap scope or revision changed', 409)
+        # An agent delegation is anchored to a roadmap version that was actually
+        # committed by an approved planning tool, not a model's claim of approval.
+        if not self.app.agent_approved_roadmap(roadmap['id'],roadmap['revision'],notebook):
+            raise AgentFault('The selected roadmap version has no recorded plan approval', 409)
+        tasks = {task['id']:task for task in json.loads(roadmap['data'])['tasks']}
+        task = tasks.get(assignment['task_id'])
+        if not task or task['status'] not in ('pending','in_progress') or any(tasks[key]['status']!='completed' for key in task['dependencies']):
+            raise AgentFault('The selected task or its prerequisites are not ready', 409)
+        return {key:task[key] for key in ('id','title','acceptance_criteria','dependencies')}
+
+    def record_child_receipt(self, run, operation, data):
+        with self.transaction():
+            child = self._fence(run['id'],run['owner'],run['generation'],cancelling=True)
+            call = self.db.execute("SELECT 1 FROM agent_calls WHERE run_id=? AND operation_id=? AND tool='execute_approved_cell' AND state='started'",(child['id'],operation)).fetchone()
+            if not call or not child['parent_id']: raise AgentFault('Execution receipt does not belong to the delegated effect',409)
+            self._event(child['parent_id'],'coding_receipt_observed',child_id=child['id'],
+                        task_id=child['grant_json']['assignment']['task_id'],execution_id=data['execution_id'],
+                        cell_id=data['cell_id'],state=data['state'],status=data['status'])
+
+    def delegate(self, run, operation):
+        with self.transaction():
+            row = self._fence(run['id'],run['owner'],run['generation'],cancelling=True)
+            call = self.db.execute("SELECT tool FROM agent_calls WHERE run_id=? AND operation_id=? AND state='started'",(row['id'],operation)).fetchone()
+            if not call or call['tool']!='delegate_coding' or row['role']!='coordinator':
+                raise AgentFault('Delegation is outside the owned effect',403)
+            self.scope_current(row)
+            grant = row['grant_json']
+            assignment = grant['assignment']
+            task = self.task_current(grant['project_id'],row['scope']['resource_id'],assignment)
+            if row['depth'] >= row['budgets']['depth'] or self.db.execute('SELECT 1 FROM agent_runs WHERE parent_id=?',(row['id'],)).fetchone():
+                raise AgentFault('Delegation depth or child count exhausted',409)
+            if self.db.execute("SELECT count(*) FROM agent_runs WHERE state IN ('queued','running','waiting_for_approval','cancelling')").fetchone()[0] >= MAX_ACTIVE:
+                raise AgentFault('Agent run capacity reached',429)
+            if self.db.execute("""SELECT 1 FROM agent_runs WHERE role='coding_agent' AND state IN
+                ('queued','running','waiting_for_approval','cancelling','needs_reconciliation','interrupted')
+                AND json_extract(scope,'$.resource_id')=?""", (row['scope']['resource_id'],)).fetchone():
+                raise AgentFault('An earlier Coding Agent run still owns or needs review for this notebook',409)
+            parent = row['budgets'].copy()
+            now = time.time()
+            reserved = {key:min(parent[key]-row[key]-margin,maximum) for key,margin,maximum in
+                        [('requests',1,6),('steps',1,16),('tools',0,6),('output_tokens',256,4096)]}
+            reserved['total_tokens'] = min(parent['total_tokens']-row['tokens']-parent['context_tokens']-256,48000)
+            if (reserved['requests']<3 or reserved['steps']<5 or reserved['tools']<2 or
+                    reserved['total_tokens']<3*parent['context_tokens'] or reserved['output_tokens']<768 or row['deadline']-now<1):
+                raise AgentFault('Insufficient remaining budget to delegate coding',409)
+            child = Budgets(**reserved, context_tokens=parent['context_tokens'], repairs=parent['repairs'],
+                            wall_seconds=min(parent['wall_seconds'],int(row['deadline']-now)),depth=0).model_dump()
+            for key in reserved: parent[key] -= child[key]
+            parent['repairs'] = 0
+            child_grant = {**grant,'capabilities':[key for key in grant['capabilities'] if key in {'read','coding.edit','coding.execute'}], 'directory':None}
+            child_id = identity()
+            self.db.execute('UPDATE agent_runs SET budgets=? WHERE id=?',(encoded(parent),row['id']))
+            self.db.execute('''INSERT INTO agent_runs(id,conversation_id,parent_id,role,scope,grant_json,budgets,provider,model,state,created_at,updated_at,deadline,depth)
+                VALUES (?,?,?,'coding_agent',?,?,?,?,?,'queued',?,?,?,?)''',
+                (child_id,row['conversation_id'],row['id'],encoded(row['scope']),encoded(child_grant),encoded(child),
+                 row['provider'],row['model'],now,now,now+child['wall_seconds'],row['depth']+1))
+            self._event(row['id'],'coding_delegated',child_id=child_id,assignment=assignment,budget=child)
+            self._event(child_id,'run_queued',parent_id=row['id'],assignment=assignment,task=task)
+            return child_id
 
 
     def record_handoff(self, run, operation, created, objective):

@@ -4,6 +4,7 @@ import inspect
 import time
 
 from agents.context import ContextManager, bounded
+from agents.coding import CodingTools
 from agents.home import HomeTools, PartialEffect, UncertainEffect
 from agents.models import ModelReply
 from agents.planning import NotebookPlanning
@@ -27,8 +28,9 @@ class AgentRuntime:
         self.store = AgentStore(state.application_store, state.workspace, self.redactor)
         self.context = ContextManager(self.store)
         self.policy = PolicyEngine(self.store)
+        self.coding = CodingTools(self.store,state)
         self.registry = ToolRegistry([*ReadTools(self.store).declarations(), HomeTools(self.store,state).declaration(),
-                                      NotebookPlanning(self.store).declaration()])
+                                      NotebookPlanning(self.store).declaration(), *self.coding.declarations()])
         self.owner, self.wake = identity(), asyncio.Event()
         self.worker, self.closing = None, False
         self.inflight = set()

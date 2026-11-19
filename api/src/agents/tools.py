@@ -132,7 +132,18 @@ class PolicyEngine:
                 roadmap = self.store.app._row(args.roadmap_id, 'roadmap')
                 if not grant['project_id'] or roadmap['project_id'] != grant['project_id'] or (roadmap['notebook_id'] and roadmap['notebook_id'] not in grant['notebooks']):
                     raise AgentFault('Roadmap is outside this run grant', 403)
+                if grant.get('assignment') and args.roadmap_id != grant['assignment']['roadmap_id']:
+                    raise AgentFault('Roadmap is outside the assigned task',403)
                 target['roadmap_id'] = args.roadmap_id
+            if tool.target_type.startswith('coding_'):
+                assignment = grant.get('assignment')
+                if not assignment or not notebook:
+                    raise AgentFault('Coding requires a selected notebook task',403)
+                if tool.target_type == 'coding_assignment' and any(getattr(args,key)!=value for key,value in assignment.items()):
+                    raise AgentFault('Delegation differs from the owner-selected task',403)
+                task = self.store.task_current(grant['project_id'],notebook,assignment)
+                target.update(assignment)
+                target['task_title'] = task['title']
             if tool.target_type == 'notebook_roadmap' and args.roadmap_id:
                 roadmap = self.store.app._row(args.roadmap_id, 'roadmap')
                 if (roadmap['project_id'], roadmap['notebook_id']) != (grant['project_id'], notebook):

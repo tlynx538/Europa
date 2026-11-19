@@ -110,6 +110,32 @@ class FakeProvider:
         calls = [m for m in messages if m['role'] == 'tool']
         names = {t['function']['name'] for t in tools}
         prompt = next(m['content'] for m in reversed(messages) if m['role']=='user')
+        if 'delegate_coding' in names or 'apply_cell_edit' in names:
+            prefix = 'Authorized coding assignment: '
+            assignment = json.loads(next(m['content'][len(prefix):] for m in messages
+                                         if isinstance(m['content'],str) and m['content'].startswith(prefix)))
+            notebook = assignment['notebook_id']
+            if 'delegate_coding' in names:
+                if calls:
+                    completed = json.loads(calls[-1]['content']).get('state')=='completed'
+                    return ModelReply(content='The Coding Agent has the approved task.' if completed else 'The task was not delegated.')
+                return ModelReply(content='I propose assigning this one task to the Coding Agent.',
+                    calls=[ToolCall(id='delegate',name='delegate_coding',arguments={k:assignment[k] for k in ('notebook_id','roadmap_id','roadmap_revision','task_id')})])
+            if not calls:
+                return ModelReply(content='This cell defines the two-state transition matrix and checks its row sums.',
+                    calls=[ToolCall(id='cell_edit',name='apply_cell_edit',arguments={'notebook_id':notebook,'revision':assignment['revision'],
+                        'action':'insert','source':'transition = [[0.8, 0.2], [0.4, 0.6]]\nprint([sum(row) for row in transition])',
+                        'explanation':'Each row is the distribution of next states for one current state.'})])
+            outcome = json.loads(calls[-1]['content'])
+            if outcome.get('state')!='completed': return ModelReply(content='The proposed notebook action did not commit. Review the recorded outcome.')
+            saved = outcome['result']['data']
+            if 'execution_id' in saved:
+                if saved['state']=='applied' and saved['status']=='ok':
+                    return ModelReply(content=f"The applied Gateway receipt {saved['execution_id']} records the matrix row sums. Review the saved cell output.")
+                return ModelReply(content='Review the execution receipt and its output before continuing.')
+            return ModelReply(content='The cell is saved. Running it requires a separate approval.',
+                calls=[ToolCall(id='cell_execute',name='execute_approved_cell',arguments={'notebook_id':notebook,
+                    **{k:saved[k] for k in ('cell_id','revision','source_hash')}})])
         if 'save_notebook_plan' in names:
             if calls and any('save_notebook_plan' in str(m.get('tool_calls','')) for m in messages):
                 outcome = json.loads(calls[-1]['content'])

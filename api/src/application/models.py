@@ -186,6 +186,7 @@ class RoadmapData(Model):
     tasks: list[TaskView]
     progress: float = Field(ge=0, le=100)
     overall_display: OverallDisplay
+    agent_approved: bool = False
 
 
 class CommentData(Model):

@@ -34,6 +34,12 @@ class Budgets(Model):
     depth: StrictInt = Field(default=1, ge=0, le=2)
 
 
+class Assignment(Model):
+    roadmap_id: Identity
+    roadmap_revision: StrictInt = Field(ge=1)
+    task_id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,64}$')
+
+
 class RunCreate(Model):
     operation_id: Operation
     scope: Scope = Field(default_factory=Scope)
@@ -44,6 +50,7 @@ class RunCreate(Model):
     cell_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{1,64}$')
     document_revision: StrictInt | None = Field(default=None, ge=1)
     parent_id: Identity | None = None
+    assignment: Assignment | None = None
 
     @model_validator(mode='after')
     def nonblank(self):
@@ -52,6 +59,8 @@ class RunCreate(Model):
             raise ValueError('A cell reference requires its document revision')
         if self.scope.kind != 'notebook' and (self.cell_id or self.parent_id):
             raise ValueError('Agent message references require notebook scope')
+        if self.assignment and (self.scope.kind != 'notebook' or self.mode != 'coordinate'):
+            raise ValueError('A coding task requires notebook coordination')
         return self
 
 

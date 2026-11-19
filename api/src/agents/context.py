@@ -25,12 +25,17 @@ class ContextManager:
         app = self.store.app
         with app.notebooks.locked(), app.mutex:
             doc = self.store.scope_current(run)
-            anchor = app.db.execute("SELECT records.sequence FROM agent_messages JOIN records ON records.id=message_id WHERE run_id=? AND purpose='user'", (run['id'],)).fetchone()
+            anchor = app.db.execute("SELECT records.sequence FROM agent_messages JOIN records ON records.id=message_id WHERE run_id=? AND purpose='user'", (run['parent_id'] or run['id'],)).fetchone()
             if anchor is None: raise AgentFault('Run has no durable request', 409)
             rows = app.db.execute("SELECT data FROM records WHERE kind='message' AND parent_id=? AND sequence<=? ORDER BY sequence DESC LIMIT 12", (run['conversation_id'], anchor[0])).fetchall()
             history = [json.loads(r['data']) for r in reversed(rows)]
             data = {'scope': run['scope'], 'conversation_id': run['conversation_id'], 'message_sequence': anchor[0]}
             project = run['grant_json']['project_id']
+            assignment = run['grant_json'].get('assignment')
+            if assignment:
+                data['coding_assignment'] = {**assignment,'role':run['role'],'notebook_id':run['scope']['resource_id'],
+                    'revision':doc['metadata']['europa']['revision'],
+                    'task':self.store.task_current(project,run['scope']['resource_id'],assignment)}
             if project:
                 p = app._project(project)
                 data['project'] = {'id': project, 'revision': p['revision'], 'title': json.loads(p['data'])['title']}
@@ -58,7 +63,14 @@ class ContextManager:
                 outcome = {'state': call['state'], 'result': json.loads(call['result']) if call['result'] else None, 'error': call['error']}
                 transcript.append([assistant, {'role': 'tool', 'tool_call_id': call['call_id'], 'content': encoded(bounded(outcome, 1500))}])
                 if call['classification'] != 'read' and outcome['result'] is not None:
-                    effects.append({'tool': call['tool'], 'state': call['state'], 'target': json.loads(call['target']), 'result': outcome['result']})
+                    if assignment:
+                        # Preserve exact effect identity and terminal evidence. The latest
+                        # tool response carries the bounded output or traceback preview.
+                        result = outcome['result'].get('data',{})
+                        effects.append({'tool':call['tool'],'state':call['state'],
+                                        'result':{key:value for key,value in result.items() if key!='outputs'}})
+                    else:
+                        effects.append({'tool': call['tool'], 'state': call['state'], 'target': json.loads(call['target']), 'result': outcome['result']})
             handoff = app.db.execute('SELECT id,project_id,notebook_id,plan FROM agent_handoffs WHERE destination_conversation_id=? ORDER BY created_at DESC LIMIT 1',(run['conversation_id'],)).fetchone()
             if handoff:
                 data['handoff'] = {**dict(handoff),'plan':json.loads(handoff['plan'])}
@@ -79,6 +91,9 @@ class ContextManager:
         target = data.pop('planning_target', None)
         if target:
             prefix.append({'role':'user', 'content':'Notebook planning target: ' + encoded(redactor.value(target))})
+        assignment = data.pop('coding_assignment',None)
+        if assignment:
+            prefix.append({'role':'user','content':'Authorized coding assignment: '+encoded(redactor.value(assignment))})
         cost = lambda items: len(encoded({'messages': items, 'tools': definitions}).encode()) + 128
         if cost([*prefix,current]) > budget: raise AgentFault('Current request and verified effects exceed context budget', 409)
         tail = []

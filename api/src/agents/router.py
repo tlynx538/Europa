@@ -36,6 +36,16 @@ async def get_run(request: Request, run: Identity):
     return await asyncio.to_thread(service(request).store.get, run)
 
 
+@router.get('/runs/{run}/executions')
+async def executions(request: Request, run: Identity):
+    return await asyncio.to_thread(service(request).coding.executions, run)
+
+
+@router.post('/runs/{run}/reconcile')
+async def reconcile(request: Request, run: Identity, body: Control):
+    return await asyncio.to_thread(service(request).coding.reconcile, run, body)
+
+
 @router.get('/runs/{run}/events')
 async def events(request: Request, run: Identity, after: int = Query(0, ge=0, le=2**63-1), limit: int = Query(30, ge=1, le=100)):
     return await asyncio.to_thread(service(request).store.events, run, after, limit)

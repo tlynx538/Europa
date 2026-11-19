@@ -2,7 +2,7 @@ import { json, request } from './api'
 import type { Message, RecordData } from './applicationApi'
 
 export type AgentScope = { kind: 'workspace' | 'project' | 'notebook'; resource_id?: string; directory?: string }
-export type AgentConfig = { enabled: boolean; model: string; provider: string; test_provider: boolean; error?: string }
+export type AgentConfig = { enabled: boolean; model: string; provider: string; test_provider: boolean; supports_tools: boolean; error?: string }
 export type AgentState = 'queued' | 'running' | 'waiting_for_approval' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'needs_reconciliation'
 export type AgentApproval = { id: string; digest: string; tool: string; target: Record<string, unknown>; arguments: Record<string, unknown>; expires_at: number }
 export type AgentRun = { id: string; role: string; state: AgentState; approval: AgentApproval | null; parent_id: string | null; error: string | null; messages: {message_id:string;purpose:string}[] }
@@ -18,4 +18,4 @@ export const agentHandoffs = (conversation:string,signal?:AbortSignal) => reques
 export const agentEvents = (run:string,after:number,signal?:AbortSignal) => request<{items:AgentEvent[];next_after:number;has_more:boolean}>(`/agents/runs/${run}/events?after=${after}`,{signal})
 export const agentStart = (body: object) => request<{id:string;conversation_id:string;message_id:string}>('/agents/runs',json('POST',body))
 export const agentDecision = (run:string,approval:AgentApproval,decision:'granted'|'denied',operation_id:string) => request(`/agents/runs/${run}/approvals/${approval.id}`,json('POST',{digest:approval.digest,decision,operation_id}))
-export const agentControl = (run:string,action:'cancel'|'resume',operation_id:string) => request(`/agents/runs/${run}/${action}`,json('POST',{operation_id}))
+export const agentControl = (run:string,action:'cancel'|'resume'|'reconcile',operation_id:string) => request(`/agents/runs/${run}/${action}`,json('POST',{operation_id}))
