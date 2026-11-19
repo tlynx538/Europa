@@ -128,7 +128,7 @@ it('disables Approve on cell approvals while drafts exist or the revision differ
   drafts.unmount()
   const changed = guarded({ drafts: false, revision: 6 })
   expect(approveOf('Run code cell').disabled).toBe(true)
-  expect(reason(approveOf('Run code cell'))).toBe('Notebook changed — the agent will re-propose.')
+  expect(reason(approveOf('Run code cell'))).toBe('Notebook changed since this was proposed.')
   changed.unmount()
   guarded({ drafts: false, revision: 5 })
   expect(approveOf('Run code cell').disabled).toBe(false)

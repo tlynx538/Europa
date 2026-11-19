@@ -26,7 +26,7 @@ class StartRun(Body):
 
 class Decision(Body):
     operation_id: OperationId
-    decision: Literal['approve', 'deny']
+    decision: Literal['approve', 'deny', 'repropose']
     digest: str = Field(pattern=r'^[a-f0-9]{64}$')
 
 
@@ -57,8 +57,8 @@ def view(store, run, *, detail=True):
     public['task'] = None if task is None else {'kickoff': True} if task.get('kickoff') else {
         k: task.get(k) for k in ('roadmap_id', 'task_id', 'title', 'assigned_by')}
     if detail:
-        public['approvals'] = [{key: a[key] for key in ('id', 'tool', 'state', 'digest', 'preview', 'revision',
-                                                         'created_at', 'expires_at', 'decided_at')}
+        public['approvals'] = [{key: a.get(key) for key in ('id', 'tool', 'state', 'digest', 'preview', 'revision',
+                                                             'created_at', 'expires_at', 'decided_at', 'reason')}
                                for a in store.approvals(run['id'])]
         public['tool_calls'] = [{'id': c['id'], 'name': c['name'], 'state': c['state'],
                                  'summary': (c['result'] or {}).get('summary'), 'status': (c['result'] or {}).get('status'),

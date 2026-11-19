@@ -59,11 +59,13 @@ const toolLabels: Record<string, string> = {
 export const cellTools = ['insert_code_cell', 'insert_markdown_cell', 'replace_cell_source', 'execute_cell']
 /** The open notebook's editing state, passed to approval cards in the notebook view only. */
 export type EditGuard = { drafts: boolean; revision?: number }
+/** Shown when the loaded notebook revision differs from the card's bound revision (owner may Re-propose). */
+export const STALE_TEXT = 'Notebook changed since this was proposed.'
 export function approveBlocked(approval: ApprovalView, guard?: EditGuard) {
   if (!guard || !cellTools.includes(approval.tool)) return null
   if (guard.drafts) return 'Save or discard your edits first.'
   const bound = approval.preview.notebook_revision
-  if (typeof bound === 'number' && guard.revision !== bound) return 'Notebook changed — the agent will re-propose.'
+  if (typeof bound === 'number' && guard.revision !== bound) return STALE_TEXT
   return null
 }
 const textOf = (value: unknown) => typeof value === 'string' && value ? value : null
@@ -97,13 +99,13 @@ export function ApprovalCard({ approval, onDecided, guard }: { approval: Approva
   const title = approval.preview.title || 'Proposed action'
   const plan = roadmapPreview(approval.preview)
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [unknown, setUnknown] = useState(() => !!pendingAgent(scopes.decision(approval.id)))
-  const send = async (decision: 'approve' | 'deny') => {
+  const send = async (decision: 'approve' | 'deny' | 'repropose') => {
     setBusy(true); setError('')
     try { await decide(approval, decision); setUnknown(false); onDecided?.() }
     catch (e) { setUnknown(unknownOutcome(e)); setError(String(e instanceof Error ? e.message : e)) }
     finally { setBusy(false) }
   }
-  const stored = pendingAgent(scopes.decision(approval.id))?.body.decision as 'approve' | 'deny' | undefined
+  const stored = pendingAgent(scopes.decision(approval.id))?.body.decision as 'approve' | 'deny' | 'repropose' | undefined
   const pending = approval.state === 'pending'
   const blocked = pending ? approveBlocked(approval, guard) : null
   const reasonId = `approval-reason-${approval.id}`
@@ -124,8 +126,8 @@ export function ApprovalCard({ approval, onDecided, guard }: { approval: Approva
     {pending ? <>
       <p className="agent-expiry">Expires <time dateTime={new Date(approval.expires_at * 1000).toISOString()}>{new Date(approval.expires_at * 1000).toLocaleString(undefined, { timeStyle: 'short', dateStyle: 'short' })}</time></p>
       {unknown && stored ? <p role="status" className="agent-warning">Your decision ({stored}) has an unknown outcome. <button type="button" disabled={busy} onClick={() => void send(stored)}>Retry</button></p>
-        : <div className="agent-buttons"><button type="button" className="agent-approve" disabled={busy || !!blocked} aria-describedby={blocked ? reasonId : undefined} onClick={() => void send('approve')}>Approve</button><button type="button" disabled={busy} onClick={() => void send('deny')}>Deny</button>{blocked && <span id={reasonId} className="agent-blocked">{blocked}</span>}</div>}
-    </> : <p className="agent-decided">{({ pending: '', approved: 'Approved', denied: 'Denied', expired: 'Expired before a decision', invalidated: 'No longer valid' } as const)[approval.state]}</p>}
+        : <div className="agent-buttons"><button type="button" className="agent-approve" disabled={busy || !!blocked} aria-describedby={blocked ? reasonId : undefined} onClick={() => void send('approve')}>Approve</button>{blocked === STALE_TEXT && <button type="button" className="agent-repropose" disabled={busy} onClick={() => void send('repropose')}>Re-propose</button>}<button type="button" disabled={busy} onClick={() => void send('deny')}>Deny</button>{blocked && <span id={reasonId} className="agent-blocked">{blocked}</span>}</div>}
+    </> : <p className="agent-decided">{approval.reason === 'stale_revision' ? 'Sent back to re-propose (notebook changed)' : ({ pending: '', approved: 'Approved', denied: 'Denied', expired: 'Expired before a decision', invalidated: 'No longer valid' } as const)[approval.state]}</p>}
     {error && <p role="alert" className="agent-error">{error}</p>}
   </section>
 }
@@ -155,10 +157,10 @@ function RunDetails({ run, onChanged, onRevealCell, guard }: Omit<PanelProps, 'c
     try { await cancelRun(run.id); onChanged?.() } catch (e) { setError(`Stopping has an unknown outcome: ${e instanceof Error ? e.message : String(e)}`) }
     finally { setStopping(false) }
   }
-  return <details className={`agent-run state-${run.state}`} open={open} onToggle={event => setOpen(event.currentTarget.open)}>
+  return <details className={`agent-run state-${run.state}`} data-run={run.id} open={open} onToggle={event => setOpen(event.currentTarget.open)}>
     <summary>{summary}</summary>
     {!!run.tool_calls.length && <ul className="agent-calls">{run.tool_calls.map(call => <li key={call.id} data-state={call.state}>
-      <span>{toolLabels[call.name] ?? call.name}</span> <small>{callStates[call.state] ?? call.state}</small>
+      <span>{toolLabels[call.name] ?? call.name}</span> <small>{call.status === 'conflict' && call.state === 'denied' ? 'Sent back: notebook changed' : callStates[call.state] ?? call.state}</small>
       {call.summary && call.state !== 'awaiting_approval' && <p>{call.summary}</p>}
       {onRevealCell && typeof call.links?.cell_id === 'string' && <button type="button" className="agent-reveal" onClick={() => onRevealCell(call.links!.cell_id as string)}>Show cell</button>}
     </li>)}</ul>}

@@ -42,7 +42,9 @@ Phase 4D Stage 2:
   never enters the code), then execute_cell on the inserted cell, then a short
   report (the harness appends receipt facts). On an applied error receipt it
   proposes one replace_cell_source repair of that cell and runs it again; a
-  denial or conflict is reported honestly as "nothing ran".
+  denial or conflict is reported honestly as "nothing ran". A stale proposal the owner
+  sends back with Re-propose is re-read (read_notebook) and proposed again once; a
+  second stale conflict is reported honestly.
 - Notebook Coordinator: "assign"/"start" (outside an open-questions answer)
   proposes delegate_task for the first task whose dependencies are completed.
 """
@@ -412,10 +414,39 @@ def coding_report(result, what):
     return f'The {what} did not complete ({status}): {summary}'
 
 
+STALE = 'The notebook changed since this was proposed. Re-read it and propose again.'
+
+
+def _stale_calls(messages):
+    """The proposals the owner sent back with Re-propose (stale notebook revision), oldest first."""
+    calls = {c['id']: c for m in messages for c in (m.get('tool_calls') or [])}
+    found = []
+    for message in messages:
+        if message['role'] == 'tool':
+            try:
+                payload = json.loads(message['content'])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict) and payload.get('summary') == STALE and message.get('tool_call_id') in calls:
+                found.append(calls[message['tool_call_id']])
+    return found
+
+
 def coding_turn(messages):
-    """Insert a task-specific cell, run it, repair once on an error receipt, then report."""
+    """Insert a task-specific cell, run it, repair once on an error receipt, then report. A stale
+    proposal sent back with Re-propose is re-read and proposed again once."""
     result = _result(messages)
     title = _task_title(messages)
+    stale = _stale_calls(messages)
+    if result is not None and result.get('summary') == STALE:
+        if len(stale) >= 2:
+            return ModelResponse(finish_reason='stop', content=(
+                'The notebook changed again before my proposal could be approved, so nothing was applied for it. '
+                'Assign the task again when the notebook is settled.'))
+        return _call('read_notebook', 'The notebook changed; re-reading it before proposing again.')
+    if result is not None and _last_tool(messages) == 'read_notebook' and stale:
+        again = stale[-1]
+        return _call(again['name'], 'Proposing the same change again against the current notebook.', json.loads(again['arguments'] or '{}'))
     if result is None:
         return _call('insert_code_cell', f'I will add a cell for "{title or "this task"}".',
                      {'source': task_code(title), 'explanation': f'Code for the task: {title or "assigned task"}'[:2000]})

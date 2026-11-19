@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { HeaderSlot, SidePanel, usePanels } from './Layout'
 import { TaskEditor } from './TaskEditor'
-import { all, change, pendingMutation, retryMutation, rawTask, type RecordData, type Project, type Roadmap, type Conversation, type Message, type Comment, type Activity, type Task } from './applicationApi'
+import { all, change, pendingMutation, retryMutation, rawTask, type RecordData, type Project, type Roadmap, type Conversation, type Message, type Comment, type Activity, type Task, type TaskView } from './applicationApi'
 import { request } from './api'
 import type { Navigate } from './Navigation'
 import { projectConversation } from './conversationProjection'
@@ -226,6 +226,32 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
     if (activeCoder) return 'A Coding Agent run is already active in this notebook.'
     return null
   }
+  // A decision or Stop changes roadmap tasks server-side before the response; reload both.
+  const runsChanged = () => { refreshRuns(); if (currentProject.current) void loadProject(currentProject.current).catch(e => setError(String(e))) }
+  // ---------------------------------------------------------------- Roadmap task progress (Phase 4D Stage 3)
+  const runLabels: Record<string, string> = { queued: 'queued', running: 'running', cancelling: 'stopping', waiting_for_approval: 'waiting for your approval' }
+  const taskRun = (roadmap: RecordData<Roadmap>, task: Task) => runs.filter(r => r.role === 'coding_agent' && r.task?.roadmap_id === roadmap.id
+    && r.task?.task_id === task.id && !terminalRunStates.includes(r.state)).at(-1)
+  const showApproval = (runId: string) => {
+    const card = document.querySelector<HTMLElement>(`[data-run="${runId}"] .agent-approval`)
+    if (!card) return
+    card.scrollIntoView({ block: 'center' })
+    const approve = card.querySelector<HTMLButtonElement>('button.agent-approve:not(:disabled)')
+    ;(approve ?? card).focus()
+  }
+  const verifiedBy = (task: TaskView) => {
+    if (task.status !== 'completed' || task.accepted_by !== 'coding_agent') return undefined
+    const evidence = [...task.evidence].reverse().find(e => e.execution_receipt_id || e.cell_ids?.length)
+    if (evidence?.execution_receipt_id) return `Completed by Coding Agent — verified by receipt ${evidence.execution_receipt_id.slice(0, 8)}`
+    return `Completed by Coding Agent — verified by notes ${(evidence?.cell_ids ?? []).map(c => c.slice(0, 8)).join(', ')}`
+  }
+  const taskAgentStatus = (roadmap: RecordData<Roadmap>, task: TaskView) => {
+    const active = agentEnabled ? taskRun(roadmap, task) : undefined
+    if (active?.state === 'waiting_for_approval') return <span className="agent-task-status waiting">Waiting for your approval <button type="button" onClick={() => showApproval(active.id)}>Show approval</button></span>
+    if (active) return <span className="agent-task-status working">Coding Agent working · {runLabels[active.state] ?? active.state}</span>
+    if (task.status === 'blocked') return <span className="agent-task-status blocked">Blocked: {task.explanation}</span>
+    return null
+  }
   const assign = async (roadmap: RecordData<Roadmap>, task: Task) => {
     if (assigning) return
     setAssigning(true); setRunError('')
@@ -252,7 +278,7 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
   }, [notebookId, question?.id, messagesLoaded])
   const runPanels = (message: RecordData<Message>) => {
     const own = runs.filter(r => !r.parent_run_id && runAnchor(r) === message.id)
-    return own.length > 0 && <div className="agent-stream">{own.map(r => <AgentRunPanel key={r.id} run={r} onChanged={refreshRuns}
+    return own.length > 0 && <div className="agent-stream">{own.map(r => <AgentRunPanel key={r.id} run={r} onChanged={runsChanged}
       onRevealCell={cell => void jump(notebookId, cell)} children={runs.filter(child => child.parent_run_id === r.id)} guard={editGuard} />)}</div>
   }
   const retryPending = async () => {
@@ -310,9 +336,12 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
          {roadmaps.length === 0 && <div className="roadmap-empty"><p className="muted">No roadmap yet. Create a plan with its first task in Project settings.</p><button onClick={panels.openSettings}>Open Project settings</button></div>}
          {roadmaps.map(r => <section className="roadmap" key={r.id}><div className="roadmap-title"><h3>{r.data.objective}</h3><strong>{r.data.progress}%</strong></div><div className="progress-label">{r.data.overall_display?.label ?? 'Overall progress'}</div><progress aria-label="Overall project progress" max="100" value={r.data.progress} />
            <h3>Tasks</h3><ol>{r.data.tasks.map((task, index) => <li className={`task ${task.display.compact ? 'compact' : ''} ${task.status}`} key={task.id}>
-             <button onClick={() => { setTaskFilter(task.id); void jump(task.links.notebook_id, task.links.cell_id) }}>{task.display.checkmark ? '✓ ' : ''}{task.title}</button><span className={`task-state ${task.status}`}>{task.status === 'pending' ? 'upcoming' : task.status === 'in_progress' ? 'current' : task.status.replace('_', ' ')}</span>
+             <button title={verifiedBy(task)} onClick={() => { setTaskFilter(task.id); void jump(task.links.notebook_id, task.links.cell_id) }}>{task.display.checkmark ? '✓ ' : ''}{task.title}</button><span className={`task-state ${task.status}`}>{task.status === 'pending' ? 'upcoming' : task.status === 'in_progress' ? 'current' : task.status.replace('_', ' ')}</span>
              {task.display.show_progress && task.status === 'in_progress' && <><span className="task-percent">{task.progress}%</span><progress aria-label={`${task.title} progress`} max="100" value={task.progress} /></>}
-            {task.explanation && <p>{task.explanation}</p>}
+            {taskAgentStatus(r, task)}
+            {task.explanation && task.status !== 'blocked' && <p>{task.explanation}</p>}
+            {task.status === 'blocked' && !agentEnabled && task.explanation && <p>{task.explanation}</p>}
+            {task.status === 'completed' && <button type="button" className="task-reopen" disabled={busy || pending} onClick={() => setEditing({ roadmap: r, task: { ...rawTask(task), status: 'in_progress', accepted: false }, newTask: false })}>Reopen</button>}
             {agentEnabled && (() => { const reason = assignBlocked(r, task); return <span className="agent-assign-wrap" title={reason ?? 'Assign this task to the Coding Agent'}>
               <button type="button" className="agent-assign" disabled={!!reason || assigning || busy || pending} aria-describedby={reason ? `assign-reason-${task.id}` : undefined} onClick={() => void assign(r, task)}>Assign to Coding Agent</button>
               {reason && <span id={`assign-reason-${task.id}`} className="visually-hidden">{reason}</span>}</span> })()}

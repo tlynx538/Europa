@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from application import models as m
 from application.store import ApplicationError
 from agents.context import assemble
+from agents.progress import TaskProgress, tracked
 from agents.policy import APPROVAL_TTL_SECONDS, MAX_CONCURRENT_RUNS, MAX_DELEGATION_DEPTH, ROLES, Budget, PolicyDenied, PolicyEngine
 from agents.providers import ProviderError
 from agents.schema import TERMINAL_RUN_STATES
@@ -25,6 +26,9 @@ from agents.store import AgentStore, LostOwnership
 from agents.tools import REGISTRY, ToolContext, ToolError, _notebook_roadmap, _project_for, clip, digest, output_text, receipt_view
 
 log = logging.getLogger(__name__)
+CELL_TOOLS = ('insert_code_cell', 'insert_markdown_cell', 'replace_cell_source', 'execute_cell')
+STALE_REASON = 'stale_revision'
+STALE_SUMMARY = 'The notebook changed since this was proposed. Re-read it and propose again.'
 SIDE_EFFECT_FREE = {'read'}
 
 
@@ -66,6 +70,7 @@ class AgentRuntime:
         self._wake = asyncio.Event()
         self._scheduler_task = None
         self._assign_lock = asyncio.Lock()
+        self.progress = TaskProgress(self)
         self.closed = False
 
     # ------------------------------------------------------------------ lifecycle
@@ -211,33 +216,49 @@ class AgentRuntime:
             return None
 
     async def decide(self, approval_id, *, operation_id, decision, digest_value):
+        if decision == 'repropose':
+            await asyncio.to_thread(self._require_stale, approval_id)
         approval, changed = await asyncio.to_thread(self.store.decide, approval_id, operation_id=operation_id,
                                                     decision=decision, digest_value=digest_value)
         if changed: self.wake()
         return approval
 
+    def _require_stale(self, approval_id):
+        """Re-propose (Phase 4D) is allowed only for a cell proposal whose bound notebook revision is
+        no longer the notebook's current revision; otherwise 409 and nothing changes."""
+        approval = self.store.approval(approval_id)
+        if approval['tool'] not in CELL_TOOLS or approval['revision'] is None or not approval['notebook_id']:
+            raise ApplicationError('Only notebook cell proposals can be re-proposed', 409)
+        current = self.services.notebooks.open(approval['notebook_id'])['metadata']['europa']['revision']
+        if current == approval['revision']:
+            raise ApplicationError('This proposal is still current; approve or deny it', 409)
+
     async def cancel(self, run_id):
         run = await asyncio.to_thread(self.store.request_cancel, run_id)
+        if run['state'] == 'cancelled':  # queued or waiting: settled here; a running run settles in its worker
+            await self._settle(run, 'cancelled')
         self.wake()
         return run
 
+    async def _settle(self, run, outcome, *, reason=None, message=None, report=''):
+        """Apply the roadmap row for a finished Coding Agent run (see agents.progress). Never raises."""
+        if not tracked(run): return
+        try:
+            if outcome == 'completed':
+                await asyncio.to_thread(self.progress.finished, run, message, report)
+            elif outcome == 'cancelled':
+                await asyncio.to_thread(self.progress.reset, run, 'the run was cancelled')
+            else:
+                await asyncio.to_thread(self.progress.blocked, run, reason or outcome)
+        except Exception as exc:
+            log.exception('Could not update roadmap progress for run %s', run['id'])
+            try:
+                await asyncio.to_thread(self.store.event, run['id'], 'task_update_failed', {'error': type(exc).__name__})
+            except Exception:
+                pass
+
     async def record_progress(self, ctx, partial):
         await asyncio.to_thread(self.store.merge_call_result, ctx.call_id, ctx.run['id'], ctx.run['_lease'], partial)
-
-    def _task_update(self, roadmap_id, task_id, operation_id, change):
-        app = self.services.app
-        for _ in range(3):
-            record = app.get(roadmap_id, 'roadmap')
-            task = next((t for t in record['data']['tasks'] if t['id'] == task_id), None)
-            if task is None: return None
-            raw = {k: task[k] for k in m.Task.model_fields}
-            change(raw)
-            try:
-                return app.roadmap_update(roadmap_id, m.TaskUpdate(operation_id=operation_id, revision=record['revision'],
-                                                                  task=m.Task.model_validate(raw)), True)
-            except ApplicationError as exc:
-                if exc.status_code != 409: raise
-        return None
 
     # ------------------------------------------------------------------ Coding Agent assignment
     # Two paths start a Coding Agent run, sharing assignable() and _start_coding():
@@ -289,10 +310,7 @@ class AgentRuntime:
                 provider=self.provider.name, model=self.provider.model, budget=ROLES['coding_agent'].budget.as_dict(),
                 event={'parent_run_id': parent['id'] if parent else None, 'task_id': task_id, 'assigned_by': assigned_by})
         if created:
-            def start(raw):
-                if raw['status'] in self.ASSIGNABLE:
-                    raw.update(status='in_progress', explanation=None)
-            await asyncio.to_thread(self._task_update, roadmap['id'], task_id, 'agent-start-' + run['id'], start)
+            await asyncio.to_thread(self.progress.start, run)
             self.wake()
         return run, created
 
@@ -360,14 +378,7 @@ class AgentRuntime:
                                     event=(event, {'error': message}))
         except LostOwnership:
             return
-        if run['role'] == 'coding_agent' and run.get('task'):
-            def block(raw):
-                if raw['status'] == 'in_progress':
-                    raw.update(status='blocked', explanation=clip(f'Coding Agent run failed: {message}', 2000))
-            try:
-                await asyncio.to_thread(self._task_update, run['task']['roadmap_id'], run['task']['task_id'], 'agent-blocked-' + run['id'], block)
-            except Exception:
-                log.exception('Could not mark task blocked')
+        await self._settle(run, 'failed', reason=f'run failed: {message}')
 
     def _repair_violation(self, run_id, name, args):
         """Repair rule: after a run of a cell whose receipt is applied with an error, the next
@@ -501,6 +512,7 @@ class AgentRuntime:
             return False
         await asyncio.to_thread(self.store.finish, run['id'], lease, 'cancelled', usage=snapshot(),
             event=('run_cancelled', {'note': 'Stopped before further agent work. Committed edits or executions are not undone.'}))
+        await self._settle(run, 'cancelled')
         return True
 
     async def _record(self, run, lease, step_idx, call, name, state, result, **extra):
@@ -524,6 +536,9 @@ class AgentRuntime:
                 verb = {'denied': 'denied by the owner', 'expired': 'expired before an owner decision',
                         'cancelled': 'cancelled'}[state]
                 result = {'status': state, 'summary': f'The proposed {existing["name"]} was {verb}. Nothing was changed.'}
+                if (existing['result'] or {}).get('reason') == STALE_REASON:
+                    # Owner chose Re-propose on a stale card: a conflict to react to, not a refusal.
+                    result = {'status': 'conflict', 'summary': STALE_SUMMARY, 'reason': STALE_REASON}
                 await asyncio.to_thread(self.store.set_call, existing['id'], run['id'], lease, state=state, result=result,
                                         event=('tool_result', {'tool': existing['name'], **_public(result)}))
                 await asyncio.to_thread(self.store.add_step, run['id'], lease, 'tool', {'tool_call_id': call['id'], 'content': _model_content(result)})
@@ -665,18 +680,9 @@ class AgentRuntime:
                 return self.services.app.message_append(run['conversation_id'], m.MessageCreate(
                     operation_id='agent-reply-plain-' + run['id'], content=clip(content, 30000)), author_role=role.author)
         message = await asyncio.to_thread(post)
-        if run['role'] == 'coding_agent' and run.get('task'):
-            summary = clip(f'Coding Agent report: {content}', 1900)
-            receipt = links.get('execution_receipt_id')
-
-            def evidence(raw):
-                if len(raw['evidence']) < 32:
-                    raw['evidence'].append({'summary': summary, 'message_id': message['id'],
-                                            'execution_receipt_id': receipt})
-            try:
-                await asyncio.to_thread(self._task_update, run['task']['roadmap_id'], run['task']['task_id'], 'agent-evidence-' + run['id'], evidence)
-            except Exception:
-                log.exception('Could not record task evidence')
+        # One task write per finished run (replaces the former agent-evidence-<run> append): a verified
+        # completion carries the evidence; otherwise the report is kept as unverified evidence.
+        await self._settle(run, 'completed', message=message, report=content)
         await asyncio.to_thread(self.store.finish, run['id'], lease, 'completed', usage=usage,
                                 result={'message_id': message['id'], 'links': message_links},
                                 event=('reply_posted', {'message_id': message['id'], 'author': role.author}))
@@ -716,10 +722,13 @@ class AgentRuntime:
             if run['cancel_requested']:
                 await asyncio.to_thread(self.store.finish, run['id'], lease, 'cancelled',
                                         event=('run_cancelled', {'note': 'Cancelled during restart recovery.'}))
+                await self._settle(run, 'cancelled')
             elif uncertain:
                 await asyncio.to_thread(self.store.finish, run['id'], lease, 'interrupted', error='Uncertain side effect after restart',
                                         event=('run_interrupted', {'reason': 'A side effect could not be verified after restart; it was not retried.',
                                                                    'tools': uncertain}))
+                await self._settle(run, 'interrupted', reason='interrupted by a server restart; the outcome of '
+                                   + ', '.join(uncertain) + ' could not be verified and was not retried')
             else:
                 await asyncio.to_thread(self.store.update, run['id'], lease, state='queued', owner=None,
                                         event=('run_recovered', {'note': 'Resumed after server restart from persisted steps.'}))

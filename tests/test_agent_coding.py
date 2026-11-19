@@ -169,7 +169,9 @@ async def test_full_flow_owner_assign_insert_execute_report_and_evidence(make):
     evidence = task(h, roadmap, 't1')['evidence']
     assert len(evidence) == 1 and evidence[0]['execution_receipt_id'] == receipt['execution_id']
     assert evidence[0]['message_id'] == h.messages(conversation)[-1]['id']
-    assert task(h, roadmap, 't1')['status'] == 'in_progress'  # acceptance stays with the owner
+    # Phase 4D Stage 3: a verified receipt auto-completes the task, attributed to the Coding Agent.
+    done = task(h, roadmap, 't1')
+    assert (done['status'], done['accepted'], done['accepted_by'], done['links']['cell_id']) == ('completed', True, 'coding_agent', inserted['id'])
     listed = (await h.http('get', f'agent/runs?conversation_id={conversation}')).json()['items']
     assert [r['id'] for r in listed] == [run['id']] and listed[0]['trigger_message_id'] == messages[0]['id']
 

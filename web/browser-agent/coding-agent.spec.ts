@@ -13,7 +13,7 @@ const MATRIX = 'Define a transition matrix'
 const coordinator = (page: Page) => page.locator('article.message[data-author="coordinator"]')
 const approval = (page: Page, title: string) => page.getByRole('region', { name: `Approval: ${title}` })
 // Match a task by its own title button: another task's disabled-reason text may name it.
-const task = (page: Page, title: string) => page.locator('#roadmap li.task').filter({ has: page.locator(':scope > button', { hasText: new RegExp(`^${title}$`) }) })
+const task = (page: Page, title: string) => page.locator('#roadmap li.task').filter({ has: page.locator(':scope > button', { hasText: new RegExp(`^(✓ )?${title}$`) }) })
 const assignButton = (page: Page, title: string) => task(page, title).getByRole('button', { name: 'Assign to Coding Agent' })
 
 async function capture(page: Page, name: string, focus: Locator, size = desktop, file = `${name}-${size === mobile ? 'mobile' : 'desktop'}.png`, hover = false) {
@@ -124,12 +124,45 @@ test('coding agent: assign task 1, approve the insert, approve the run, applied 
   await expect(page.locator('.save-indicator')).toContainText('Saved')
   await expect(approve).toBeEnabled()
 
+  // Phase 4D Stage 3 (owner addition): the owner saves an edit while the insert card is pending.
+  // The card is stale: Approve stays disabled, Re-propose sends it back, the agent proposes again.
+  const runId = (await response.json()).id as string
+  const before = ((await (await request.get(`/api/agent/runs/${runId}`)).json()).approvals as { revision: number }[])[0].revision
+  await editor.click()
+  await page.keyboard.press('End')
+  await page.keyboard.type('0')
+  await page.getByRole('button', { name: 'Save notebook' }).click()
+  await expect(page.locator('.save-indicator')).toContainText('Saved')
+  await expect(insert.getByText('Notebook changed since this was proposed.')).toBeVisible()
+  await expect(approve).toBeDisabled()
+  await expect(insert.getByRole('button', { name: 'Deny', exact: true })).toBeEnabled()
+  const repropose = insert.getByRole('button', { name: 'Re-propose', exact: true })
+  await expect(repropose).toBeEnabled()
+  await capture(page, 'repropose', insert, desktop, 'repropose-stale-desktop.png')
+  const sentBack = page.waitForResponse(r => /\/api\/agent\/approvals\/[a-f0-9]{32}$/.test(r.url()) && r.request().method() === 'POST')
+  await repropose.click()
+  const decision = await sentBack
+  expect(decision.status()).toBe(200)
+  expect(decision.request().postDataJSON().decision).toBe('repropose')
+  await expect(insert.getByText('Notebook changed since this was proposed.')).toHaveCount(0)
+  await expect(approve).toBeEnabled()  // a new card, bound to the saved revision
+  const current = (await (await request.get(`/api/notebooks/${notebook}`)).json()).metadata.europa.revision as number
+  const approvals = (await (await request.get(`/api/agent/runs/${runId}`)).json()).approvals as { state: string; reason: string | null; revision: number }[]
+  expect(approvals.map(a => [a.state, a.reason])).toEqual([['denied', 'stale_revision'], ['pending', null]])
+  expect(approvals[1].revision).toBe(current)
+  expect(current).toBeGreaterThan(before)
+
   // Approve the insert: the agent's cell appears, then a separate approval to run it.
   await decide(page, insert)
   const run = approval(page, 'Run code cell')
   await expect(run).toBeVisible()
   await expect(run.getByRole('note')).toContainText('Not a sandbox')
   await expect(page.locator('.cell .cm-content', { hasText: 'row sum = {sum(row)}' })).toHaveCount(1)
+  // Both the owner's saved edit and the agent's cell persisted.
+  const sources = ((await (await request.get(`/api/notebooks/${notebook}`)).json()).cells as { source: string | string[] }[])
+    .map(cell => Array.isArray(cell.source) ? cell.source.join('') : cell.source)
+  expect(sources[0]).toBe('owner_note = 10')
+  expect(sources[1]).toContain("print(f'{state}: row sum = {sum(row)}')")
   expect((await (await request.get(`/api/notebooks/${notebook}/executions?offset=0&limit=100`)).json()).items).toEqual([])  // not run yet
   await expect(run.getByRole('button', { name: 'Approve', exact: true })).toBeEnabled()  // the view caught up with the new revision
   await decide(page, run)
@@ -145,7 +178,28 @@ test('coding agent: assign task 1, approve the insert, approve the run, applied 
   await expect(report).toContainText('applied, status ok.')
   await expect(report).toContainText('A: row sum = 1.0')
   const [first] = await roadmapTasks(request, project)
-  expect(first.status).toBe('in_progress')  // acceptance stays with the owner
+  expect(first.status).toBe('completed')  // Phase 4D Stage 3: verified by the applied receipt
   expect(first.evidence).toHaveLength(1)
   await capture(page, 'coding-report', report)
+
+  // Phase 4D Stage 3: the Roadmap panel updates without a reload.
+  await expect(task(page, MATRIX).locator(':scope > button:not(.task-reopen)')).toHaveText(`✓ ${MATRIX}`)
+  await expect(task(page, MATRIX).locator(':scope > button:not(.task-reopen)')).toHaveAttribute('title', /^Completed by Coding Agent — verified by receipt [a-f0-9]{8}$/)
+  await expect(page.locator('#roadmap .roadmap-title strong')).toHaveText('25%')
+  await expect(page.locator('#roadmap progress[aria-label="Overall project progress"]')).toHaveAttribute('value', '25')
+  await expect(assignButton(page, 'Simulate transitions')).toBeEnabled()
+  const [, second] = await roadmapTasks(request, project)
+  expect(second.status).toBe('pending')
+  await capture(page, 'progress-completed', page.locator('#roadmap .roadmap-title'))
+  // Mobile: the Roadmap panel is a modal opened from View → Roadmap panel.
+  await page.setViewportSize(mobile)
+  await page.waitForFunction(width => document.documentElement.clientWidth === width, mobile.width)
+  await page.getByRole('menubar').getByRole('menuitem', { name: 'View', exact: true }).click()
+  await page.getByRole('menuitemcheckbox', { name: /Roadmap panel/ }).click()
+  await expect(page.locator('#roadmap .roadmap-title strong')).toHaveText('25%')
+  await expect(task(page, MATRIX).locator(':scope > button:not(.task-reopen)')).toHaveText(`✓ ${MATRIX}`)
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  await page.screenshot({ path: join(captures, 'progress-completed-mobile.png'), animations: 'disabled' })
+  await page.keyboard.press('Escape')
+  await page.setViewportSize(desktop)
 })

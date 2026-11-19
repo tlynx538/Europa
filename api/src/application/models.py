@@ -61,6 +61,9 @@ class Evidence(Model):
     summary: str = Field(min_length=1, max_length=2000)
     message_id: str | None = None
     execution_receipt_id: str | None = None
+    # Notes-only Coding Agent completion (Phase 4D): the Markdown cells it wrote. New entries
+    # with cell_ids are accepted only on the trusted server path (see ApplicationStore._validate_plan).
+    cell_ids: list[str] = Field(default_factory=list, max_length=32)
 
 
 class Task(Model):

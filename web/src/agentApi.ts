@@ -21,7 +21,7 @@ export function roadmapPreview(preview: ApprovalPreview): RoadmapPreview | null 
   const revision = typeof preview.roadmap_revision === 'number' && Number.isInteger(preview.roadmap_revision) ? preview.roadmap_revision : null
   return { objective: text(preview.objective), rationale: text(preview.rationale), tasks, removed: texts(preview.removed_task_ids), revision }
 }
-export interface ApprovalView { id: string; tool: string; state: 'pending' | 'approved' | 'denied' | 'expired' | 'invalidated'; digest: string; preview: ApprovalPreview; expires_at: number; created_at?: number; decided_at?: number | null }
+export interface ApprovalView { id: string; tool: string; state: 'pending' | 'approved' | 'denied' | 'expired' | 'invalidated'; digest: string; preview: ApprovalPreview; expires_at: number; created_at?: number; decided_at?: number | null; reason?: string | null }
 export interface ToolCallView { id: string; name: string; state: string; summary: string | null; status: string | null; links: Record<string, string | number | null> | null; data: { notebook_id?: string; notebook_path?: string; project_id?: string; [key: string]: unknown } | null }
 export interface RunView {
   id: string; role: string; state: RunState; conversation_id: string; trigger_message_id: string | null; parent_run_id?: string | null
@@ -90,7 +90,7 @@ export const postHomeMessage = (conversation: string, content: string) =>
   persistAndSend<RecordData<Message>>(scopes.message(conversation), `/conversations/${encodeURIComponent(conversation)}/messages`, { content })
 export const startRun = (conversation: string, message: string) =>
   persistAndSend<RunView>(scopes.run(conversation), '/agent/runs', { conversation_id: conversation, message_id: message })
-export const decide = (approval: ApprovalView, decision: 'approve' | 'deny') =>
+export const decide = (approval: ApprovalView, decision: 'approve' | 'deny' | 'repropose') =>
   persistAndSend<Decision>(scopes.decision(approval.id), `/agent/approvals/${encodeURIComponent(approval.id)}`, { decision, digest: approval.digest })
 export const cancelRun = (run: string) =>
   persistAndSend<RunView>(scopes.cancel(run), `/agent/runs/${encodeURIComponent(run)}/cancel`, {})
