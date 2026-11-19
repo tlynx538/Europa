@@ -45,7 +45,10 @@ def view(store, run, *, detail=True):
     public = {key: run[key] for key in ('id', 'role', 'state', 'conversation_id', 'trigger_message_id', 'notebook_id',
                                         'project_id', 'parent_run_id', 'depth', 'provider', 'model', 'budget', 'usage',
                                         'error', 'result', 'created_at', 'updated_at', 'started_at', 'finished_at')}
-    public['task'] = None if run['task'] is None else {k: run['task'][k] for k in ('roadmap_id', 'task_id', 'title')}
+    task = run['task']
+    # A kickoff run's task holds the Home purpose; only the kickoff flag is public.
+    public['task'] = None if task is None else {'kickoff': True} if task.get('kickoff') else {
+        k: task[k] for k in ('roadmap_id', 'task_id', 'title')}
     if detail:
         public['approvals'] = [{key: a[key] for key in ('id', 'tool', 'state', 'digest', 'preview', 'revision',
                                                          'created_at', 'expires_at', 'decided_at')}

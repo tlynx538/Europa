@@ -59,7 +59,7 @@ def roadmaps(h, project):
 
 def test_notebook_role_has_no_delegation_and_default_budget():
     role = ROLES['notebook_coordinator']
-    assert role.tools == ('read_notebook', 'read_roadmap', 'read_execution', 'propose_roadmap')
+    assert role.tools == ('read_notebook', 'read_roadmap', 'read_execution', 'propose_roadmap', 'ask_owner')
     assert 'delegate' not in role.capabilities and role.budget == Budget()
     run = {'role': 'notebook_coordinator', 'notebook_id': 'a' * 32, 'depth': 0}
     for name in FORBIDDEN:

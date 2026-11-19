@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 import time
-from typing import Any, Awaitable, Callable
+from typing import Annotated, Any, Awaitable, Callable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -86,6 +86,7 @@ class Tool:
     bind: Callable[[ToolContext, Any], Awaitable[dict]] | None = None
     preview: Callable[[ToolContext, Any, dict], dict] | None = None
     reconcile: Callable[[ToolContext, Any, dict | None, dict | None], Awaitable[tuple[str, dict | None]]] | None = None
+    per_run: int | None = None  # Maximum calls per run that are not rejected/failed (enforced by the harness)
 
     def spec(self):
         schema = self.args.model_json_schema()
@@ -292,14 +293,16 @@ async def create_project_notebook(ctx, args, binding):
                 raise ToolError('Project binding changed', 'conflict')
         conversation = services.app.bind_physical_notebook(notebook, location)
         origin = ctx.run['conversation_id']
-        services.app.message_append(conversation['id'], m.MessageCreate(
+        message = services.app.message_append(conversation['id'], m.MessageCreate(
             operation_id=op + '-origin', content=clip(
                 f'Notebook created from a Home conversation (origin {origin}). Purpose: {args.purpose}', 4000)),
             author_role='coordinator')
+        # The origin message replays by operation ID, so its identity is stable across recovery.
+        # Its presence in the result is what makes the harness start a kickoff run (Phase 4D).
         return {'notebook_id': notebook, 'notebook_path': binding['notebook_path'],
                 'project_id': location.get('project_id') or (project or {}).get('id'),
                 'project_path': location.get('project_path'), 'conversation_id': conversation['id'],
-                'origin_conversation_id': origin}
+                'origin_conversation_id': origin, 'origin_message_id': message['id']}
     try:
         result = await run_sync(work)
     except (WorkspaceError, NotebookError) as exc:
@@ -316,6 +319,29 @@ async def reconcile_create(ctx, args, binding, _partial):
         return 'succeeded', await create_project_notebook(ctx, args, binding)
     except ToolError as exc:
         return 'uncertain', {'summary': f'Creation outcome requires inspection: {exc}'}
+
+
+# --------------------------------------------------------------------------- Coordinators: ask the owner
+
+class AskOwnerArgs(Args):
+    questions: list[Annotated[str, Field(min_length=1, max_length=500, pattern=r'\S')]] = Field(
+        min_length=1, max_length=6, description='One to six specific questions for the owner')
+    preamble: str | None = Field(default=None, max_length=1000, description='One short sentence shown before the questions')
+
+
+def questions_text(args):
+    numbered = '\n'.join(f'{index}. {question.strip()}' for index, question in enumerate(args.questions, 1))
+    return f'{args.preamble.strip()}\n\n{numbered}' if args.preamble and args.preamble.strip() else numbered
+
+
+async def ask_owner(ctx, args, _binding):
+    # One coordinator message marked needs_input. The operation ID is the call's own
+    # ('agent-<tool call id>'), so a recovery replay returns the committed message.
+    message = await run_sync(ctx.services.app.message_append, ctx.run['conversation_id'], m.MessageCreate(
+        operation_id=ctx.operation_id, content=questions_text(args), state='needs_input'), author_role='coordinator')
+    count = len(args.questions)
+    return {'summary': f"Asked the owner {count} question{'s' if count != 1 else ''}; their answer will arrive as a new message",
+            'data': {'message_id': message['id'], 'questions': count}}
 
 
 # --------------------------------------------------------------------------- Notebook Coordinator
@@ -620,10 +646,10 @@ async def reconcile_execute(ctx, _args, binding, partial):
 # --------------------------------------------------------------------------- registry
 
 def _tool(name, description, args, capability, execute, *, approval=False, idempotency='read', timeout=30.0,
-          bind=None, preview=None, reconcile=None, version=1):
+          bind=None, preview=None, reconcile=None, version=1, per_run=None):
     return Tool(name=name, version=version, description=description, args=args, capability=capability,
                 approval=approval, idempotency=idempotency, timeout=timeout, execute=execute, bind=bind,
-                preview=preview, reconcile=reconcile)
+                preview=preview, reconcile=reconcile, per_run=per_run)
 
 
 REGISTRY = {tool.name: tool for tool in [
@@ -640,6 +666,9 @@ REGISTRY = {tool.name: tool for tool in [
     _tool('propose_roadmap', 'Propose a new or revised roadmap for this notebook. Requires owner approval.',
           ProposeRoadmapArgs, 'propose:roadmap', propose_roadmap, approval=True, idempotency='operation_id',
           bind=bind_roadmap, preview=preview_roadmap, reconcile=reconcile_roadmap),
+    _tool('ask_owner', 'Post 1-6 numbered questions for the owner (marked "Needs your input") when information is missing. '
+          'At most once per run; no approval needed.',
+          AskOwnerArgs, 'ask:owner', ask_owner, idempotency='operation_id', per_run=1),
     _tool('delegate_task', 'Assign one approved roadmap task whose dependencies are complete to the Coding Agent.',
           DelegateArgs, 'delegate', delegate_task, idempotency='operation_id'),
     _tool('insert_code_cell', 'Propose inserting a code cell. Requires owner approval. Does not run it.',

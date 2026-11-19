@@ -60,3 +60,6 @@
 .agent-ask { display: flex; align-items: center; gap: 6px; width: fit-content; margin: 0 0 6px 8px; padding: 3px 10px 3px 6px;
   font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
 .agent-stream-alert { margin: 0 8px 6px; padding: 6px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; }
+/* Phase 4D: a Coordinator message that asks the owner questions. */
+.needs-input-badge { margin-right: auto; padding: 1px 8px; border: 1px solid var(--warning); border-radius: 10px; color: var(--warning);
+  background: var(--surface); font-size: 11px; font-weight: 600; }

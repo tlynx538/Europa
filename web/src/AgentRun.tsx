@@ -51,7 +51,7 @@ const toolLabels: Record<string, string> = {
   list_workspace: 'Looked at workspace files', list_projects: 'Listed projects', list_notebooks: 'Listed notebooks',
   read_notebook_summary: 'Read a notebook summary', create_project_notebook: 'Create project and notebook',
   read_notebook: 'Read the notebook', read_roadmap: 'Read the roadmap', read_execution: 'Read an execution receipt',
-  propose_roadmap: 'Propose roadmap',
+  propose_roadmap: 'Propose roadmap', ask_owner: 'Ask the owner',
 }
 const callStates: Record<string, string> = {
   rejected: 'Not allowed', awaiting_approval: 'Waiting for approval', approved: 'Approved', denied: 'Denied', expired: 'Expired',

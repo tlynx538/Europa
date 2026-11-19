@@ -30,14 +30,15 @@ class Role:
 
 ROLES = {
     'home_coordinator': Role(
-        'home_coordinator', 'coordinator', frozenset({'read:workspace', 'propose:workspace'}),
-        ('list_workspace', 'list_projects', 'list_notebooks', 'read_notebook_summary', 'create_project_notebook'),
+        'home_coordinator', 'coordinator', frozenset({'read:workspace', 'propose:workspace', 'ask:owner'}),
+        ('list_workspace', 'list_projects', 'list_notebooks', 'read_notebook_summary', 'create_project_notebook', 'ask_owner'),
         'workspace', Budget(model_calls=6, tool_calls=10)),
     # Phase 4C: the Notebook Coordinator discusses and plans only. Delegation
-    # (delegate_task / 'delegate') stays disabled for this role until Phase 4D.
+    # (delegate_task / 'delegate') stays disabled for this role until a later Phase 4D stage.
+    # Phase 4D Stage 1 adds ask_owner (no approval; one needs_input message per run).
     'notebook_coordinator': Role(
-        'notebook_coordinator', 'coordinator', frozenset({'read:notebook', 'read:roadmap', 'propose:roadmap'}),
-        ('read_notebook', 'read_roadmap', 'read_execution', 'propose_roadmap'),
+        'notebook_coordinator', 'coordinator', frozenset({'read:notebook', 'read:roadmap', 'propose:roadmap', 'ask:owner'}),
+        ('read_notebook', 'read_roadmap', 'read_execution', 'propose_roadmap', 'ask_owner'),
         'notebook'),
     'coding_agent': Role(
         'coding_agent', 'coding_agent', frozenset({'read:notebook', 'edit:notebook', 'execute:notebook'}),

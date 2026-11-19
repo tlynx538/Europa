@@ -155,6 +155,59 @@ class AgentRuntime:
         if created: self.wake()
         return run
 
+    def _kickoff_scope(self, notebook_id, conversation_id, origin_message_id):
+        app = self.services.app
+        with app.transaction():
+            canonical = app.db.execute('SELECT conversation_id FROM canonical_notebook_conversations WHERE notebook_id=?',
+                                       (notebook_id,)).fetchone()
+            if canonical is None or canonical['conversation_id'] != conversation_id:
+                raise ApplicationError('Kickoff conversation is not the notebook conversation', 409)
+            message = app._row(origin_message_id, 'message')
+            if message['parent_id'] != conversation_id:
+                raise ApplicationError('Origin message belongs to another conversation', 422)
+            membership = app.db.execute('SELECT project_id FROM memberships WHERE notebook_id=? AND associated=1',
+                                        (notebook_id,)).fetchone()
+        return membership['project_id'] if membership else None
+
+    async def start_kickoff(self, notebook_id, conversation_id, origin_message_id, purpose, *, operation_id):
+        """Internal, trusted path (never exposed over REST): start the Notebook Coordinator
+        kickoff run of a notebook that Home just created. Its trigger is the coordinator-authored
+        origin message, which REST start_run rejects. Replaying the operation ID is a no-op."""
+        project = await asyncio.to_thread(self._kickoff_scope, notebook_id, conversation_id, origin_message_id)
+        purpose = clip(purpose, 1000)
+        run, created = await asyncio.to_thread(
+            self.store.create_run, operation_id=operation_id,
+            payload={'kickoff': notebook_id, 'conversation': conversation_id, 'message': origin_message_id, 'purpose': purpose},
+            role='notebook_coordinator', conversation_id=conversation_id, trigger_message_id=origin_message_id,
+            notebook_id=notebook_id, project_id=project, parent_run_id=None, depth=0,
+            task={'kickoff': True, 'purpose': purpose}, provider=self.provider.name, model=self.provider.model,
+            budget=ROLES['notebook_coordinator'].budget.as_dict(), event={'kickoff': True})
+        if created: self.wake()
+        return run
+
+    async def _kickoff_after_create(self, run, lease, call, result, *, record=True):
+        """Start the kickoff run for a succeeded create_project_notebook call. Only results that
+        carry origin_message_id (Phase 4D and later) qualify. Failure never fails the Home run."""
+        data = (result or {}).get('data') or {}
+        if call['name'] != 'create_project_notebook' or not data.get('origin_message_id'):
+            return None
+        try:
+            return await self.start_kickoff(data['notebook_id'], data['conversation_id'], data['origin_message_id'],
+                                            (call.get('arguments') or {}).get('purpose') or '',
+                                            operation_id='agent-kickoff-' + call['id'])
+        except Exception as exc:
+            log.warning('Kickoff for notebook %s was not started (%s)', data.get('notebook_id'), type(exc).__name__)
+            if record:
+                try:
+                    await asyncio.to_thread(self.store.event, run['id'], 'kickoff_failed',
+                                            {'notebook_id': data.get('notebook_id'),
+                                             'error': clip(str(exc) or type(exc).__name__, 300)}, lease)
+                except LostOwnership:
+                    raise
+                except Exception:
+                    log.exception('Could not record kickoff failure')
+            return None
+
     async def decide(self, approval_id, *, operation_id, decision, digest_value):
         approval, changed = await asyncio.to_thread(self.store.decide, approval_id, operation_id=operation_id,
                                                     decision=decision, digest_value=digest_value)
@@ -265,6 +318,8 @@ class AgentRuntime:
             task = run['task']
             return (f"Task {task['task_id']}: {task['title']}\nAcceptance criteria:\n- " + '\n- '.join(task['acceptance_criteria'])
                     + f"\n\nInstructions: {task['instructions']}")
+        if (run.get('task') or {}).get('kickoff'):
+            return f"Kickoff for a new notebook. Owner's purpose: {run['task']['purpose']}"
         message = self.services.app.get(run['trigger_message_id'], 'message')
         text = message['data']['content']
         if message['data'].get('cell_id'):
@@ -382,6 +437,14 @@ class AgentRuntime:
             await self._record(run, lease, step_idx, call, call['name'][:64] or 'unknown', 'rejected',
                                {'status': 'policy', 'summary': f'Not permitted: {exc}'})
             return 'done'
+        if tool.per_run is not None:
+            earlier = [c for c in await asyncio.to_thread(self.store.tool_calls, run['id'])
+                       if c['name'] == tool.name and c['state'] not in {'rejected', 'failed'}]
+            if len(earlier) >= tool.per_run:
+                await self._record(run, lease, step_idx, call, tool.name, 'rejected',
+                                   {'status': 'policy', 'summary': f'{tool.name} may be used at most {tool.per_run} time(s) per run; '
+                                                                   'wait for the owner to answer.'}, version=tool.version)
+                return 'done'
         try:
             raw = json.loads(call['arguments'] or '{}')
             if not isinstance(raw, dict): raise ValueError('arguments must be an object')
@@ -454,6 +517,10 @@ class AgentRuntime:
         result = {**{k: v for k, v in partial.items() if k == 'execution_id'}, **result}
         await asyncio.to_thread(self.store.set_call, call['id'], run['id'], lease, state=state, result=result,
                                 event=('tool_result', {'tool': tool.name, **_public(result)}))
+        if state == 'succeeded':
+            # After the durable 'succeeded' state, never from inside the tool. A crash
+            # before this point is covered by the recovery sweep (same operation ID).
+            await self._kickoff_after_create(run, lease, call, result)
         await asyncio.to_thread(self.store.add_step, run['id'], lease, 'tool',
                                 {'tool_call_id': call['provider_call_id'], 'content': _model_content(result)})
 
@@ -529,6 +596,8 @@ class AgentRuntime:
                 result = {'status': (result or {}).get('status', 'ok' if state == 'succeeded' else state), **(result or {})}
                 await asyncio.to_thread(self.store.set_call, call['id'], run['id'], lease, state=state, result=result,
                                         event=('tool_reconciled', {'tool': call['name'], 'outcome': state, **_public(result)}))
+                if state == 'succeeded':
+                    await self._kickoff_after_create(run, lease, call, result)
                 await asyncio.to_thread(self.store.add_step, run['id'], lease, 'tool',
                                         {'tool_call_id': call['provider_call_id'], 'content': _model_content(result)})
                 if state == 'uncertain': uncertain.append(call['name'])
@@ -542,3 +611,9 @@ class AgentRuntime:
             else:
                 await asyncio.to_thread(self.store.update, run['id'], lease, state='queued', owner=None,
                                         event=('run_recovered', {'note': 'Resumed after server restart from persisted steps.'}))
+        # A crash after a create call reached 'succeeded' but before its kickoff started leaves
+        # no other trace: start any missing kickoff. The operation ID makes this exactly-once,
+        # and creations from before Phase 4D (no origin_message_id) never get a kickoff.
+        for call in await asyncio.to_thread(self.store.tool_calls, None, 'succeeded'):
+            if call['name'] == 'create_project_notebook':
+                await self._kickoff_after_create({'id': call['run_id']}, None, call, call['result'], record=False)

@@ -22,6 +22,18 @@ take a separate branch; rules apply in this order:
 4. a status request ("status", "left", "blocked", "progress", "done") calls
    read_roadmap and lists task states taken only from that tool result;
 5. anything else gets a short reply naming the notebook's cell count and revision.
+
+Phase 4D Stage 1 adds two Notebook Coordinator behaviours:
+- kickoff runs (the trusted system prompt contains "Kickoff run:") call ask_owner
+  with five questions naming the purpose's key subject; after that result a
+  project notebook gets a draft propose_roadmap (Markov tasks when the purpose
+  mentions Markov, generic tasks otherwise) and then one short sentence; a
+  standalone notebook gets one short sentence saying planning needs a project;
+- answers: when the newest needs_input coordinator message in the fenced
+  conversation has no owner message after it except the current one, and the
+  message is not a status request, the message is treated as an answer and a
+  propose_roadmap revision of the current roadmap (or a fresh draft when none
+  was saved) adds one task titled from the answer. This rule runs before rule 2.
 """
 import json
 import re
@@ -223,20 +235,149 @@ def status_report(result):
     return '\n'.join(lines)
 
 
+# --------------------------------------------------------------------------- Phase 4D kickoff and answers
+
+KICKOFF_ROLE = 'Kickoff run:'
+KICKOFF_TEXT = re.compile(r"^Kickoff for a new notebook\. Owner's purpose:\s*(.*)$", re.DOTALL)
+PURPOSE_PREFIX = re.compile(r'^\s*owner objective:\s*', re.IGNORECASE)
+
+
+def subject(purpose):
+    """The purpose's key subject in the owner's own words, e.g. 'Markov chain'."""
+    text = PURPOSE_PREFIX.sub('', purpose)
+    match = None
+    for match in INTENT.finditer(text):
+        pass
+    words = key_words(text[match.end():] if match else text) or key_words(text)
+    return ' '.join(words[:MAX_WORDS]) or 'this notebook'
+
+
+def kickoff_questions(purpose):
+    topic = subject(purpose)
+    return [f'What do you want to achieve with the {topic}, and how will you know the notebook succeeded?',
+            f'What data should the {topic} work use: a file, an API, or data we simulate here?',
+            f'What outputs do you expect from the {topic} analysis: plots, tables, a model or a written summary?',
+            f'Are there constraints on time, tools or libraries for the {topic} work?',
+            f'What do you already know about the {topic}, so I can skip or explain the basics?']
+
+
+def _history(context):
+    """The fenced conversation history, or [] when it is missing or truncated."""
+    body = next((body for source, body in FENCE.findall(context) if source.startswith('conversation:')), None)
+    try:
+        items = json.loads(body) if body else []
+    except ValueError:
+        return []
+    return items if isinstance(items, list) else []
+
+
+def open_questions(context):
+    """True when the newest needs_input coordinator message has no owner message after it
+    other than the current one (the last entry), i.e. the owner is answering it now."""
+    history = _history(context)
+    for index in range(len(history) - 1, -1, -1):
+        item = history[index] if isinstance(history[index], dict) else {}
+        if item.get('author') == 'coordinator' and item.get('needs_input'):
+            later = [x for x in history[index + 1:] if isinstance(x, dict) and x.get('author') == 'user']
+            return len(later) == 1
+    return False
+
+
+def answer_arguments(text, context, roadmap):
+    """A revision (or a fresh draft when nothing was saved) that incorporates the answer."""
+    answer = ' '.join(text.split())
+    title = clip_title(f'Use your answer: {answer}')
+    if roadmap:
+        arguments, kept, _ = plan_arguments('', '', roadmap)
+        arguments['tasks'] = arguments['tasks'][:kept]
+    else:
+        arguments, kept, _ = plan_arguments(text, context, None)
+        arguments['objective'] = clip_title(f'Plan for: {answer}', 2000)
+    keys = {t['key'] for t in arguments['tasks']}
+    key = 'answer'
+    while key in keys: key += '-n'
+    previous = arguments['tasks'][-1]['key'] if arguments['tasks'] else None
+    arguments['tasks'].append({'key': key, 'title': title, 'acceptance_criteria': [clip_title(f'The notebook reflects the owner answer: {answer}')],
+                               'depends_on': [previous] if previous else []})
+    arguments['rationale'] = 'Deterministic demo revision from the owner answer (not an LLM).'
+    return arguments
+
+
+def clip_title(text, limit=200):
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
+
+
+def _answer_proposal(text, context, roadmap):
+    arguments = answer_arguments(text, context, roadmap)
+    verb = 'revising the roadmap' if roadmap else 'a draft roadmap'
+    return _call('propose_roadmap', f'Thanks. I propose {verb} that adds a task for your answer. '
+                 'Please review the plan; nothing is saved until you approve it.', arguments)
+
+
+def _roadmap_from_context(context):
+    """(found, roadmap view or None). found=False means the fenced roadmap was unreadable."""
+    fenced = _fenced(context, 'roadmap')
+    if fenced is None or fenced == 'No roadmap yet.':
+        return True, None
+    try:
+        roadmap = json.loads(fenced)
+    except ValueError:
+        return False, None
+    return True, roadmap if isinstance(roadmap, dict) else None
+
+
+def kickoff_turn(messages, available, text, context, standalone):
+    purpose = (KICKOFF_TEXT.match(text) or [None, text])[1].strip()
+    result = _result(messages)
+    if result is None:
+        if 'ask_owner' not in available:
+            return ModelResponse(content='The notebook is ready. Tell me what you want to do first.', finish_reason='stop')
+        return _call('ask_owner', 'A few questions before we start.', {
+            'preamble': f'Before we start on the {subject(purpose)}, a few questions:', 'questions': kickoff_questions(purpose)})
+    tool = _last_tool(messages)
+    if tool == 'ask_owner':
+        if standalone or 'propose_roadmap' not in available:
+            return ModelResponse(finish_reason='stop', content=(
+                'Please answer the questions above. Planning needs a project, and this notebook is not in one, so I did not draft a roadmap.'))
+        found, roadmap = _roadmap_from_context(context)
+        arguments, kept, added = plan_arguments(PURPOSE_PREFIX.sub('', purpose), context, roadmap if found else None)
+        return _call('propose_roadmap', (
+            f'This is a draft roadmap with {added} tasks built from your purpose: '
+            + ' → '.join(t['title'] for t in arguments['tasks'][kept:])
+            + '. Your answers can refine it; nothing is saved until you approve it.'),
+            {**arguments, 'rationale': 'Draft built from the purpose; answers to the questions can refine it. Deterministic demo (not an LLM).'})
+    if tool == 'propose_roadmap':
+        if result.get('status', 'ok') == 'ok':
+            return ModelResponse(finish_reason='stop', content='Saved the draft roadmap; answer the questions above and I will refine it.')
+        return ModelResponse(finish_reason='stop', content='The draft was not saved; answer the questions above and I will propose a plan.')
+    return ModelResponse(content='Please answer the questions above.', finish_reason='stop')
+
+
 def notebook_turn(messages, available):
     text, context = owner_message(messages), _context(messages)
     standalone = 'Project: none' in _unfenced(context)
+    if KICKOFF_ROLE in _system(messages):
+        return kickoff_turn(messages, available, text, context, standalone)
+    answering = (not standalone and 'propose_roadmap' in available and not STATUS.search(text)
+                 and open_questions(context))
     result = _result(messages)
     if result is not None:
         tool = _last_tool(messages)
         if tool == 'propose_roadmap':
             return ModelResponse(content=plan_report(result), finish_reason='stop')
+        if tool == 'read_roadmap' and answering and result.get('status') == 'ok' and (result.get('data') or {}).get('project_id'):
+            return _answer_proposal(text, context, (result.get('data') or {}).get('roadmap'))
         if tool == 'read_roadmap' and PLAN.search(text) and result.get('status') == 'ok' \
                 and (result.get('data') or {}).get('project_id') and 'propose_roadmap' in available:
             return _propose(text, context, (result.get('data') or {}).get('roadmap'))
         if tool == 'read_roadmap':
             return ModelResponse(content=status_report(result), finish_reason='stop')
         return ModelResponse(content=(result.get('summary') or 'Done.').strip(), finish_reason='stop')
+    if answering:
+        found, roadmap = _roadmap_from_context(context)
+        if not found:  # Context was truncated: read the authoritative roadmap first.
+            return _call('read_roadmap', 'Reading the current roadmap before revising it with your answer.')
+        return _answer_proposal(text, context, roadmap)
     if standalone and PLAN.search(text):
         return ModelResponse(finish_reason='stop', content=(
             'Planning needs a project. This notebook is not in a project, so I cannot create a roadmap for it. '

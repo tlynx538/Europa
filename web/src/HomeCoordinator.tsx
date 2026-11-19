@@ -3,6 +3,7 @@ import { all, type Message, type RecordData } from './applicationApi'
 import { agentStatus, homeConversation, newHomeConversation, pendingAgent, postHomeMessage, providerLabel, retryAgent, scopes, startRun, unknownOutcome, type AgentStatus, type RunView } from './agentApi'
 import { AgentRunPanel, useAgentRuns } from './AgentRun'
 import type { Navigate } from './Navigation'
+import { consumeKickoffFocus, requestKickoffFocus } from './kickoffFocus'
 import './agent.css'
 
 const openKey = 'europa.agent.home.open'
@@ -112,7 +113,7 @@ function CoordinatorPanel({ status, navigate, onWorkspaceChanged }: { status: Ag
           <article className="home-message" data-author={author} id={`home-message-${message.id}`}>
             <h4>{author === 'user' ? 'You' : 'Coordinator'}</h4>
             <p>{message.data.content}</p>
-            {author === 'coordinator' && message.data.notebook_id && <button type="button" onClick={() => void navigate(`/notebooks/${message.data.notebook_id}`)}>Open notebook</button>}
+            {author === 'coordinator' && message.data.notebook_id && <button type="button" onClick={() => { const id = message.data.notebook_id!; requestKickoffFocus(id); void navigate(`/notebooks/${id}`).then(moved => { if (!moved) consumeKickoffFocus() }) }}>Open notebook</button>}
           </article>
           {runs.filter(run => run.trigger_message_id === message.id).map(run => <AgentRunPanel key={run.id} run={run} onChanged={refresh} />)}
         </div>
