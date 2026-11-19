@@ -1,7 +1,7 @@
 import { test, expect, type Page, type APIRequestContext } from '../browserFixtures'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { findSessionRow } from '../browserSessionNavigation'
+import { findSessionRow, waitForSessionState } from '../browserSessionNavigation'
 
 const captureRoot = process.env.EUROPA_CAPTURE_ROOT || resolve('../docs/screenshots/phase3h/final')
 async function capture(page: Page, name: string) {
@@ -60,6 +60,7 @@ for (const context of ['project', 'standalone', 'catalog'] as const) {
     await capture(page, `${context}-editor`)
     await fileMenu(page, 'Return Home')
     await expect(page).toHaveURL(/\/$/)
+    await waitForSessionState(request, info, { id }, 'Idle')
     const row = await findSessionRow(page, title)
     await expect(row.getByRole('cell', { name: 'Idle', exact: true })).toBeVisible()
     const after = await (await request.get(`/api/runtime?notebook_id=${id}`)).json()
@@ -135,6 +136,7 @@ test('multiple real notebooks retain separate idle kernels across dashboard navi
     await page.getByRole('link', { name: 'Europa', exact: true }).click()
   }
   for (const notebook of notebooks) {
+    await waitForSessionState(request, info, { id: notebook.id }, 'Idle')
     const row = await findSessionRow(page, notebook.title)
     await expect(row.getByRole('cell', { name: 'Idle', exact: true })).toBeVisible()
     const result = await request.get(`/api/kernel/info?notebook_id=${notebook.id}&kernel_id=${notebook.kernel}`)

@@ -1,10 +1,10 @@
 import { expect, test } from '../browserFixtures'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { resolve, join } from 'node:path'
-import { findSessionRow } from '../browserSessionNavigation'
+import { confirmHeldSessionState, findSessionRow, waitForSessionState } from '../browserSessionNavigation'
 
 const captures = resolve(process.env.EUROPA_CAPTURE_ROOT ? `${process.env.EUROPA_CAPTURE_ROOT}/sessions` : '../docs/screenshots/phase3h/final/sessions')
-test('persisted mixed recents and real Idle, Busy, Idle, Stopped sessions', async ({ page, request }) => {
+test('persisted mixed recents and real Idle, Busy, Idle, Stopped sessions', async ({ page, request }, testInfo) => {
   mkdirSync(captures, { recursive: true })
   const capture = async (name: string) => {
     await page.evaluate(() => document.fonts.ready)
@@ -37,6 +37,7 @@ test('persisted mixed recents and real Idle, Busy, Idle, Stopped sessions', asyn
   expect((await (await request.get(`/api/notebooks/${physicalId}/session`)).json()).kernels).toBe(0)
   const kernel = await request.post(`/api/kernel/start?notebook_id=${physicalId}`)
   expect(kernel.status()).toBe(201)
+  await waitForSessionState(request, testInfo, { id: physicalId }, 'Idle')
   const row = await findSessionRow(page, 'Imported')
   await expect(row.getByRole('cell', { name: 'Idle', exact: true })).toBeVisible()
   await expect(row.getByRole('button', { name: 'Shut down' })).toBeDisabled()
@@ -50,24 +51,14 @@ test('persisted mixed recents and real Idle, Busy, Idle, Stopped sessions', asyn
   const execute = await request.post(`/api/notebooks/${physicalId}/cells/${cell}/execute`, { data: { revision: (await edited.json()).metadata.europa.revision } })
   expect(execute.status()).toBe(202)
   const executionId = (await execute.json()).execution_id
-  const status = async () => {
-    let cursor: string | null = null
-    do {
-      const data = await (await request.get(`/api/dashboard/sessions${cursor ? `?cursor=${cursor}` : ''}`)).json()
-      const item = data.items.find((item: { id: string }) => item.id === physicalId)
-      if (item) return item.state
-      cursor = data.next_cursor
-    } while (cursor)
-    return 'Missing'
-  }
   try {
-    await expect.poll(status).toBe('Busy')
+    await confirmHeldSessionState(request, testInfo, { id: physicalId }, 'Busy')
     await page.getByRole('button', { name: 'Refresh', exact: true }).click()
     await expect(row.getByRole('cell', { name: 'Busy', exact: true })).toBeVisible()
     await capture('running-busy-real')
   } finally { writeFileSync(release, 'release') }
   await expect.poll(async () => (await (await request.get(`/api/notebooks/${physicalId}/executions/${executionId}`)).json()).state).toBe('applied')
-  await expect.poll(status).toBe('Idle')
+  await waitForSessionState(request, testInfo, { id: physicalId }, 'Idle')
   await page.getByRole('button', { name: 'Refresh', exact: true }).click()
   await expect(row.getByRole('cell', { name: 'Idle', exact: true })).toBeVisible()
   await page.route('**/api/dashboard/sessions*', route => route.abort('failed'))
@@ -77,6 +68,7 @@ test('persisted mixed recents and real Idle, Busy, Idle, Stopped sessions', asyn
   await capture('running-failed-refresh')
   await page.unroute('**/api/dashboard/sessions*')
   expect((await request.delete(`/api/runtime?notebook_id=${physicalId}`)).status()).toBe(204)
+  await waitForSessionState(request, testInfo, { id: physicalId }, 'Stopped')
   await page.getByRole('button', { name: 'Refresh', exact: true }).click()
   await expect(row.getByRole('cell', { name: 'Stopped', exact: true })).toBeVisible()
   await capture('running-stopped-real')
