@@ -17,6 +17,9 @@ restart or lost agent connection does not prove its child processes stopped.
 Record the candidate, active task, test owner, last actual result, and next step
 in a short checkpoint. Do not paste private session exports or credentials here.
 
+Role capabilities and the owner's current concurrency exception are recorded in
+[agent-roles.md](agent-roles.md).
+
 ## Small tasks before milestone work
 
 Use one worker at a time on this development machine. Give each worker an outcome,
