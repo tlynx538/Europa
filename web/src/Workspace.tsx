@@ -7,7 +7,7 @@ import type { Navigate } from './Navigation'
 import { projectConversation } from './conversationProjection'
 import { ConversationComposer, clearSentDraft, type CellReference } from './ConversationComposer'
 import { InlineCommentComposer, clearSentCommentDraft } from './InlineCommentComposer'
-import { agentStatus, pendingAgent, retryAgent, scopes, startRun, unknownOutcome, type RunView } from './agentApi'
+import { agentStatus, assignTask, pendingAgent, retryAgent, scopes, startRun, terminalRunStates, unknownOutcome, type RunView } from './agentApi'
 import { AgentRunPanel, useAgentRuns } from './AgentRun'
 import { consumeKickoffFocus, editingCell, kickoffFocusPending, openQuestion } from './kickoffFocus'
 
@@ -205,7 +205,7 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
   // origin message; it renders after the questions it asked, so the questions come before its draft plan card.
   const runAnchor = (run: RunView) => {
     const start = messages.findIndex(m => m.id === run.trigger_message_id)
-    if (start < 0 || messages[start].data.author_role === 'user') return run.trigger_message_id
+    if (start < 0 || !run.task?.kickoff) return run.trigger_message_id
     for (const later of messages.slice(start + 1)) {
       if (later.data.author_role === 'user') break
       if (later.data.author_role === 'coordinator' && later.data.state === 'needs_input') return later.id
@@ -213,6 +213,31 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
     return run.trigger_message_id
   }
   const question = agentEnabled ? openQuestion(messages) : null
+  // Cell-changing approvals wait for the owner's drafts and the bound revision (see ApprovalCard).
+  const editGuard = { drafts: draftCells.length > 0, revision }
+  // ---------------------------------------------------------------- Owner assignment to the Coding Agent (Phase 4D)
+  const activeCoder = runs.some(r => r.role === 'coding_agent' && !terminalRunStates.includes(r.state))
+  const [assigning, setAssigning] = useState(false)
+  const assignBlocked = (roadmap: RecordData<Roadmap>, task: Task) => {
+    if (!member || roadmap.notebook_id !== notebookId) return 'This roadmap belongs to another notebook; open that notebook to assign its tasks.'
+    if (!['pending', 'blocked', 'needs_input'].includes(task.status)) return `This task is ${task.status === 'in_progress' ? 'already in progress' : task.status.replace('_', ' ')}.`
+    const waiting = task.dependencies.map(id => roadmap.data.tasks.find(t => t.id === id)).filter(t => !t || t.status !== 'completed')
+    if (waiting.length) return `Waiting for: ${waiting.map(t => t?.title ?? 'a missing task').join(', ')}.`
+    if (activeCoder) return 'A Coding Agent run is already active in this notebook.'
+    return null
+  }
+  const assign = async (roadmap: RecordData<Roadmap>, task: Task) => {
+    if (assigning) return
+    setAssigning(true); setRunError('')
+    try {
+      await assignTask(roadmap.id, task.id)
+      refreshRuns()
+      const id = currentConversation.current
+      if (id) { setMessages(await all<Message>(`/conversations/${id}/messages`)); setMessagesLoaded(true) }
+      if (project) await loadProject(project.id)
+    } catch (e) { setRunError(`The Coding Agent could not start: ${e instanceof Error ? e.message : String(e)}`) }
+    finally { setAssigning(false) }
+  }
   useEffect(() => {
     // One-shot after Home's "Open notebook": reveal the kickoff questions once they arrive.
     if (!notebookId) return
@@ -228,7 +253,7 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
   const runPanels = (message: RecordData<Message>) => {
     const own = runs.filter(r => !r.parent_run_id && runAnchor(r) === message.id)
     return own.length > 0 && <div className="agent-stream">{own.map(r => <AgentRunPanel key={r.id} run={r} onChanged={refreshRuns}
-      onRevealCell={cell => void jump(notebookId, cell)} children={runs.filter(child => child.parent_run_id === r.id)} />)}</div>
+      onRevealCell={cell => void jump(notebookId, cell)} children={runs.filter(child => child.parent_run_id === r.id)} guard={editGuard} />)}</div>
   }
   const retryPending = async () => {
     const operation = pendingMutation()
@@ -288,6 +313,9 @@ export function Workspace({ notebookId, cells, draftCells = [], conflict = false
              <button onClick={() => { setTaskFilter(task.id); void jump(task.links.notebook_id, task.links.cell_id) }}>{task.display.checkmark ? '✓ ' : ''}{task.title}</button><span className={`task-state ${task.status}`}>{task.status === 'pending' ? 'upcoming' : task.status === 'in_progress' ? 'current' : task.status.replace('_', ' ')}</span>
              {task.display.show_progress && task.status === 'in_progress' && <><span className="task-percent">{task.progress}%</span><progress aria-label={`${task.title} progress`} max="100" value={task.progress} /></>}
             {task.explanation && <p>{task.explanation}</p>}
+            {agentEnabled && (() => { const reason = assignBlocked(r, task); return <span className="agent-assign-wrap" title={reason ?? 'Assign this task to the Coding Agent'}>
+              <button type="button" className="agent-assign" disabled={!!reason || assigning || busy || pending} aria-describedby={reason ? `assign-reason-${task.id}` : undefined} onClick={() => void assign(r, task)}>Assign to Coding Agent</button>
+              {reason && <span id={`assign-reason-${task.id}`} className="visually-hidden">{reason}</span>}</span> })()}
             <details><summary>Task details</summary><ul>{task.acceptance_criteria.map((c, i) => <li key={i}>{c}</li>)}</ul>{task.evidence.map((e, i) => <p key={i}>{e.summary}</p>)}
               <button disabled={busy || pending} onClick={() => setEditing({ roadmap: r, task: rawTask(task), newTask: false })}>Edit task</button>
               <button disabled={busy || pending || index === 0} onClick={() => void run(async () => { const tasks = r.data.tasks.map(rawTask); [tasks[index - 1], tasks[index]] = [tasks[index], tasks[index - 1]]; await change(`/roadmaps/${r.id}`, 'PUT', { revision: r.revision, objective: r.data.objective, tasks }); await loadProject(project.id) })}>Move task up</button>

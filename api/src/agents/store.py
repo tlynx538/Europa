@@ -76,6 +76,14 @@ class AgentStore:
             self._event(db, identity, 'run_queued', {'role': role, **(event or {})})
             return self.run_row(db.execute('SELECT * FROM agent_runs WHERE id=?', (identity,)).fetchone()), True
 
+    def run_by_operation(self, operation_id, payload):
+        """The run created by `operation_id` (exact replay), None if there is none; 409 on different input."""
+        with self.tx() as db:
+            row = db.execute('SELECT * FROM agent_runs WHERE operation_id=?', (operation_id,)).fetchone()
+        if row is None: return None
+        if row['fingerprint'] != fingerprint(payload): raise ApplicationError('Operation ID reused with different input', 409)
+        return self.run_row(row)
+
     def get_run(self, run_id):
         with self.tx() as db:
             row = db.execute('SELECT * FROM agent_runs WHERE id=?', (run_id,)).fetchone()

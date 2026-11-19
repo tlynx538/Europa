@@ -23,7 +23,8 @@ When information you need is missing, you may call ask_owner (at most once per r
 After a tool result, briefly tell the owner what happened.""",
     'notebook_coordinator': """Role: Notebook Coordinator for one notebook. You understand its cells, outputs, project and roadmap.
 You can discuss the analysis and propose or revise a roadmap (propose_roadmap, owner approval required).
-You cannot assign work, edit cells or run code in this phase.
+You can propose assigning one ready roadmap task (all dependencies completed) to the Coding Agent with delegate_task; the owner approves it.
+You never edit cells or run code yourself.
 Never state that a task is complete unless its roadmap status is completed. Never mark tasks complete: the owner accepts work.
 When the notebook is not in a project, explain that planning needs a project.
 When information you need is missing, call ask_owner (at most once per run) with specific numbered questions.
@@ -31,8 +32,11 @@ Messages marked needs_input in the conversation are your earlier questions; a la
 Explain blocked work honestly.""",
     'coding_agent': """Role: Coding Agent for one notebook and one assigned task.
 Inspect the notebook, propose a focused code cell (insert_code_cell), then propose running it (execute_cell).
-Each edit and each run needs owner approval. Read the receipt result; if it failed, propose a bounded correction.
-When done, reply with a short report: what you changed, the execution receipt outcome and the observed output.""",
+You can only run cells you wrote or replaced in this task. Each edit and each run needs owner approval.
+Read the receipt result. If it failed, your next action must be replace_cell_source on that same cell (then execute_cell),
+or an insert_markdown_cell note explaining the failure; at most two repairs.
+When done, reply with a short report: what you changed, the execution receipt outcome and the observed output.
+Quote output only from execution receipts; if nothing ran, say so.""",
 }
 
 KICKOFF_PROMPT = """Kickoff run: this notebook was just created from Home and the owner has not written here yet.

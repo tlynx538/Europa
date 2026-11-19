@@ -284,13 +284,24 @@ class NotebookStore:
                 if name.startswith(notebook + '.') and name.endswith('.execution.json') and ID.fullmatch(name[33:-15])],
                 key=lambda r: r['created_at'])
 
-    def begin(self, notebook, cell_id, revision):
+    def begin(self, notebook, cell_id, revision, execution_id=None):
+        """Write the receipt before any kernel request. A caller-supplied execution ID
+        (32 hex) makes acceptance idempotent: if that receipt already exists the request
+        is refused with 409 and nothing is executed again."""
         with self.locked():
+            if execution_id is not None:
+                identifier(execution_id)
+                try:
+                    self._read(self._receipt_name(notebook, execution_id))
+                except NotebookError as exc:
+                    if exc.status_code != 404: raise
+                else:
+                    raise NotebookError('Execution already accepted', 409)
             document = self._open(notebook); self._check(document, revision)
             cell = self.cell(document, cell_id)
             if cell['cell_type'] != 'code' or not source(cell).strip() or len(source(cell)) > 1_000_000:
                 raise NotebookError('Execution requires a nonblank code cell of at most 1000000 characters')
-            execution = uuid.uuid4().hex
+            execution = execution_id or uuid.uuid4().hex
             receipt = {'notebook_id': notebook, 'cell_id': cell_id, 'execution_id': execution,
                 'expected_revision': revision + 1, 'source_hash': source_hash(cell), 'created_at': time.time(), 'state': 'prepared'}
             self._write(self._receipt_name(notebook, execution), receipt)

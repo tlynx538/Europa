@@ -34,6 +34,13 @@ class Operation(Body):
     operation_id: OperationId
 
 
+class Assign(Body):
+    operation_id: OperationId
+    roadmap_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    task_id: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,64}$')
+    instructions: str | None = Field(default=None, max_length=4000)
+
+
 def runtime(request):
     value = getattr(request.app.state, 'agent_runtime', None)
     if value is None:
@@ -48,7 +55,7 @@ def view(store, run, *, detail=True):
     task = run['task']
     # A kickoff run's task holds the Home purpose; only the kickoff flag is public.
     public['task'] = None if task is None else {'kickoff': True} if task.get('kickoff') else {
-        k: task[k] for k in ('roadmap_id', 'task_id', 'title')}
+        k: task.get(k) for k in ('roadmap_id', 'task_id', 'title', 'assigned_by')}
     if detail:
         public['approvals'] = [{key: a[key] for key in ('id', 'tool', 'state', 'digest', 'preview', 'revision',
                                                          'created_at', 'expires_at', 'decided_at')}
@@ -92,6 +99,16 @@ async def new_home_conversation(request: Request, body: Operation):
 async def start_run(request: Request, body: StartRun):
     rt = runtime(request)
     run = await rt.start_run(operation_id=body.operation_id, conversation_id=body.conversation_id, message_id=body.message_id)
+    return await asyncio.to_thread(view, rt.store, run)
+
+
+@router.post('/tasks/assign', status_code=201)
+async def assign_task(request: Request, body: Assign):
+    """Owner assignment of one roadmap task to the Coding Agent. The server checks the same
+    readiness rules as an approved Coordinator delegation; an exact replay returns the same run."""
+    rt = runtime(request)
+    run = await rt.assign_task(operation_id=body.operation_id, roadmap_id=body.roadmap_id, task_id=body.task_id,
+                               instructions=body.instructions)
     return await asyncio.to_thread(view, rt.store, run)
 
 

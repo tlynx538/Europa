@@ -446,9 +446,25 @@ class DelegateArgs(Args):
     instructions: str = Field(min_length=1, max_length=4000)
 
 
-async def delegate_task(ctx, args, _binding):
+async def bind_delegate(ctx, args):
+    # Same readiness rules as execution; the binding pins the roadmap revision the owner reviews.
+    roadmap, task = await run_sync(ctx.services.runtime.assignable, ctx.notebook_id, args.task_id)
+    return {'notebook_id': ctx.notebook_id, 'project_id': roadmap['project_id'], 'roadmap_id': roadmap['id'],
+            'roadmap_revision': roadmap['revision'], 'task_id': task['id'], 'title': task['title'],
+            'acceptance_criteria': task['acceptance_criteria']}
+
+
+def preview_delegate(_ctx, args, binding):
+    return {'title': f"Assign '{binding['title']}' to the Coding Agent", 'task_id': binding['task_id'],
+            'acceptance_criteria': binding['acceptance_criteria'], 'instructions': args.instructions,
+            'roadmap_revision': binding['roadmap_revision'],
+            'warning': 'The Coding Agent proposes cells and runs one at a time; each needs your approval.'}
+
+
+async def delegate_task(ctx, args, binding):
     runtime = ctx.services.runtime
-    child = await runtime.delegate(ctx.run, args.task_id, args.instructions, operation_id=ctx.operation_id)
+    child = await runtime.delegate(ctx.run, args.task_id, args.instructions, operation_id=ctx.operation_id,
+                                   roadmap_revision=(binding or {}).get('roadmap_revision'))
     return {'summary': f'Assigned task {args.task_id} to the Coding Agent', 'data': {'child_run_id': child['id'], 'task_id': args.task_id}}
 
 
@@ -564,12 +580,37 @@ class ExecuteCellArgs(Args):
     explanation: str = Field(default='', max_length=2000)
 
 
+EDIT_TOOLS = ('insert_code_cell', 'insert_markdown_cell', 'replace_cell_source')
+NOT_OWN = 'The Coding Agent can only run cells it wrote in this task.'
+
+
+def _edited_cell(call):
+    """The cell a succeeded edit call of this run wrote, and the source hash it recorded."""
+    if call['name'] == 'replace_cell_source':
+        return call['binding']['cell_id'], call['binding']['after_hash']
+    return ((call['result'] or {}).get('data') or {}).get('cell_id'), call['binding']['source_hash']
+
+
+def own_cell_hash(calls, cell_id):
+    """(owned_by_replace, expected_hash) from this run's latest succeeded edit of `cell_id`, or None."""
+    edits = [c for c in calls if c['name'] in EDIT_TOOLS and c['state'] == 'succeeded' and _edited_cell(c)[0] == cell_id]
+    if not edits: return None
+    return edits[-1]['name'] == 'replace_cell_source', _edited_cell(edits[-1])[1]
+
+
 async def bind_execute(ctx, args):
     document = await run_sync(ctx.services.notebooks.open, ctx.notebook_id)
     try: cell = ctx.services.notebooks.cell(document, args.cell_id)
     except NotebookError: raise ToolError('Cell does not exist', 'conflict') from None
     if cell['cell_type'] != 'code' or not source(cell).strip():
         raise ToolError('Only nonblank code cells can be executed')
+    # Execute only the agent's own work: a cell this run inserted (marker) or replaced, whose
+    # current source is exactly what this run's latest edit of it wrote.
+    calls = await run_sync(ctx.services.runtime.store.tool_calls, ctx.run['id'])
+    marker = (cell['metadata'].get('europa_agent') or {}).get('run_id') == ctx.run['id']
+    owned = own_cell_hash(calls, args.cell_id)
+    if owned is None or not (marker or owned[0]) or source_hash(cell) != owned[1]:
+        raise ToolError(NOT_OWN, 'policy')
     return {'notebook_id': ctx.notebook_id, 'revision': document['metadata']['europa']['revision'],
             'cell_id': args.cell_id, 'source_hash': source_hash(cell), 'source': clip(source(cell), 20000)}
 
@@ -602,6 +643,10 @@ def _execution_result(receipt):
 
 
 async def execute_cell(ctx, args, binding):
+    if await _receipt(ctx, ctx.call_id) is not None:
+        # Already accepted under this call's ID (a replay): bind that receipt, never run again.
+        return _execution_result(await _await_receipt(ctx, ctx.call_id, time.monotonic() + 150))
+
     def check():
         document = ctx.services.notebooks.open(ctx.notebook_id)
         cell = ctx.services.notebooks.cell(document, binding['cell_id'])
@@ -613,30 +658,36 @@ async def execute_cell(ctx, args, binding):
         raise ToolError('The target cell no longer exists; it was not executed.', 'conflict') from None
     service = ctx.services.notebook_service()
     if service is None: raise ToolError('Notebook execution service is unavailable')
+    # The execution ID is the tool call's own ID (32 hex): accepting it twice is impossible,
+    # and a lost acknowledgement or a restart is resolved by reading the receipt by this ID.
+    execution = ctx.call_id
     try:
-        receipt = await service.submit(ctx.notebook_id, binding['cell_id'], binding['revision'], timeout=120)
-    except NotebookError as exc:
-        kind = 'conflict' if exc.status_code == 409 else 'error'
-        raise ToolError(f'Execution was not accepted: {exc}', kind) from None
-    # Persist the receipt identity before waiting: it is the reconciliation anchor.
-    await ctx.services.runtime.record_progress(ctx, {'execution_id': receipt['execution_id']})
-    final = await _await_receipt(ctx, receipt['execution_id'], time.monotonic() + 150)
+        await service.submit(ctx.notebook_id, binding['cell_id'], binding['revision'], timeout=120, execution_id=execution)
+    except Exception as exc:  # Rejected, already accepted, or acknowledgement lost: the receipt decides.
+        if await _receipt(ctx, execution) is None:
+            if isinstance(exc, NotebookError):
+                kind = 'conflict' if exc.status_code == 409 else 'error'
+                raise ToolError(f'Execution was not accepted: {exc}', kind) from None
+            raise ToolError(f'Execution was not accepted ({type(exc).__name__}); nothing ran') from None
+    await ctx.services.runtime.record_progress(ctx, {'execution_id': execution})
+    final = await _await_receipt(ctx, execution, time.monotonic() + 150)
     return _execution_result(final)
 
 
-async def reconcile_execute(ctx, _args, binding, partial):
-    execution = (partial or {}).get('execution_id')
-    if execution is None:
-        receipts = await run_sync(ctx.services.notebooks.executions, ctx.notebook_id)
-        started = (partial or {}).get('started_at', 0)
-        matching = [r for r in receipts if r['cell_id'] == binding['cell_id'] and r['created_at'] >= started
-                    and r['source_hash'] == binding['source_hash']]
-        if not matching:
-            return 'not_applied', None  # Receipts are written before any kernel request.
-        if len(matching) > 1:
-            return 'uncertain', {'summary': 'Several executions match; outcome must be reviewed'}
-        execution = matching[0]['execution_id']
-    receipt = await run_sync(ctx.services.notebooks.execution, ctx.notebook_id, execution)
+async def _receipt(ctx, execution):
+    try:
+        return await run_sync(ctx.services.notebooks.execution, ctx.notebook_id, execution)
+    except NotebookError as exc:
+        if exc.status_code == 404: return None
+        raise
+
+
+async def reconcile_execute(ctx, _args, _binding, _partial):
+    # Receipts are written (by this call's ID) before any kernel request: absent means nothing ran.
+    receipt = await _receipt(ctx, ctx.call_id)
+    if receipt is None:
+        return 'not_applied', None
+    execution = receipt['execution_id']
     if receipt['state'] not in TERMINAL_RECEIPTS and receipt['state'] != 'completed':
         return 'uncertain', {'summary': f'Execution {execution[:8]} outcome is unknown; it was not re-run',
                              'links': {'execution_receipt_id': execution}}
@@ -669,8 +720,10 @@ REGISTRY = {tool.name: tool for tool in [
     _tool('ask_owner', 'Post 1-6 numbered questions for the owner (marked "Needs your input") when information is missing. '
           'At most once per run; no approval needed.',
           AskOwnerArgs, 'ask:owner', ask_owner, idempotency='operation_id', per_run=1),
-    _tool('delegate_task', 'Assign one approved roadmap task whose dependencies are complete to the Coding Agent.',
-          DelegateArgs, 'delegate', delegate_task, idempotency='operation_id'),
+    _tool('delegate_task', 'Propose assigning one roadmap task whose dependencies are complete to the Coding Agent. '
+          'Requires owner approval.',
+          DelegateArgs, 'delegate', delegate_task, approval=True, idempotency='operation_id',
+          bind=bind_delegate, preview=preview_delegate),
     _tool('insert_code_cell', 'Propose inserting a code cell. Requires owner approval. Does not run it.',
           InsertCellArgs, 'edit:notebook', insert_cell, approval=True, idempotency='marker',
           bind=_bind_insert('code'), preview=preview_insert, reconcile=reconcile_insert),

@@ -28,6 +28,7 @@ export interface RunView {
   notebook_id: string | null; project_id: string | null; provider: string; model: string; error: string | null
   result: { message_id?: string; links?: Record<string, string> } | null; created_at: number; updated_at: number; finished_at: number | null
   approvals: ApprovalView[]; tool_calls: ToolCallView[]
+  depth?: number; task?: { kickoff?: boolean; roadmap_id?: string; task_id?: string; title?: string; assigned_by?: 'user' | 'coordinator' | null } | null
 }
 export interface Decision { id: string; run_id: string; state: string; decided_at: number | null }
 
@@ -51,6 +52,7 @@ export const scopes = {
   run: (conversation: string) => `run.${conversation}`,
   decision: (approval: string) => `approval.${approval}`,
   cancel: (run: string) => `cancel.${run}`,
+  assign: (roadmap: string, task: string) => `assign.${roadmap}.${task}`,
   home: 'home.new',
 }
 
@@ -92,6 +94,9 @@ export const decide = (approval: ApprovalView, decision: 'approve' | 'deny') =>
   persistAndSend<Decision>(scopes.decision(approval.id), `/agent/approvals/${encodeURIComponent(approval.id)}`, { decision, digest: approval.digest })
 export const cancelRun = (run: string) =>
   persistAndSend<RunView>(scopes.cancel(run), `/agent/runs/${encodeURIComponent(run)}/cancel`, {})
+/** Owner assignment of one roadmap task to the Coding Agent (Phase 4D). */
+export const assignTask = (roadmap: string, task: string) =>
+  persistAndSend<RunView>(scopes.assign(roadmap, task), '/agent/tasks/assign', { roadmap_id: roadmap, task_id: task })
 export const newHomeConversation = () =>
   persistAndSend<RecordData<{ title: string }>>(scopes.home, '/agent/home/conversations', {})
 

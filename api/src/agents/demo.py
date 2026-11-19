@@ -34,6 +34,17 @@ Phase 4D Stage 1 adds two Notebook Coordinator behaviours:
   message is not a status request, the message is treated as an answer and a
   propose_roadmap revision of the current roadmap (or a fresh draft when none
   was saved) adds one task titled from the answer. This rule runs before rule 2.
+
+Phase 4D Stage 2:
+- Coding Agent runs (system prompt contains "Role: Coding Agent") propose one
+  insert_code_cell with pure-Python Markov code chosen by the task title (matrix,
+  simulate, stationary, convergence; a small generic cell otherwise; the title
+  never enters the code), then execute_cell on the inserted cell, then a short
+  report (the harness appends receipt facts). On an applied error receipt it
+  proposes one replace_cell_source repair of that cell and runs it again; a
+  denial or conflict is reported honestly as "nothing ran".
+- Notebook Coordinator: "assign"/"start" (outside an open-questions answer)
+  proposes delegate_task for the first task whose dependencies are completed.
 """
 import json
 import re
@@ -353,6 +364,86 @@ def kickoff_turn(messages, available, text, context, standalone):
     return ModelResponse(content='Please answer the questions above.', finish_reason='stop')
 
 
+# --------------------------------------------------------------------------- Phase 4D Stage 2: Coding Agent
+
+CODING_ROLE = 'Role: Coding Agent'
+ASSIGN = re.compile(r'\b(assign|start)\b', re.IGNORECASE)
+MATRIX = 'P = [[0.9, 0.1], [0.5, 0.5]]\n'
+STEP = 'pi = [sum(pi[i] * P[i][j] for i in range(2)) for j in range(2)]\n'
+CODE = (
+    ('matrix', MATRIX + "for state, row in zip(['A', 'B'], P):\n    print(f'{state}: row sum = {sum(row)}')\n"),
+    ('simulat', 'import random\n\nrandom.seed(7)\n' + MATRIX + 'state, visits = 0, [0, 0]\nfor _ in range(10000):\n'
+                '    visits[state] += 1\n    state = 0 if random.random() < P[state][0] else 1\n'
+                "print('visit frequencies:', [round(v / sum(visits), 3) for v in visits])\n"),
+    ('stationary', MATRIX + 'pi = [0.5, 0.5]\nfor _ in range(100):\n    ' + STEP
+                   + "print('stationary distribution:', [round(p, 4) for p in pi])\n"),
+    ('converg', MATRIX + 'target = [5 / 6, 1 / 6]\npi = [1.0, 0.0]\nfor step in range(1, 11):\n    ' + STEP
+                + '    gap = max(abs(a - b) for a, b in zip(pi, target))\n'
+                + "    print(f'step {step}: gap = {gap:.4f}')\n"),
+)
+GENERIC_CODE = "values = [1, 2, 3]\nprint('sum =', sum(values))\n"
+
+
+def task_code(title):
+    """Task-specific Markov code chosen by title; the title itself never enters the code."""
+    lowered = (title or '').lower()
+    return next((code for key, code in CODE if key in lowered), GENERIC_CODE)
+
+
+def _task_title(messages):
+    user = next((m['content'] for m in messages if m['role'] == 'user'), '') or ''
+    body = _fenced(user, 'coordinator-instructions') or ''
+    match = re.match(r'Task [^:]+: (.*)', body)
+    return match.group(1).strip() if match else ''
+
+
+def _calls_made(messages, name):
+    return [c for m in messages for c in (m.get('tool_calls') or []) if c['name'] == name]
+
+
+def coding_report(result, what):
+    status, summary = result.get('status', 'ok'), (result.get('summary') or '').strip()
+    if status == 'denied':
+        return f'You denied the {what}, so nothing ran. Nothing else was attempted.'
+    if status in {'expired', 'cancelled'}:
+        return f'The {what} {status} before approval, so nothing ran.'
+    if status == 'conflict':
+        return f'The {what} hit a conflict: {summary} Nothing was overwritten and nothing ran.'
+    return f'The {what} did not complete ({status}): {summary}'
+
+
+def coding_turn(messages):
+    """Insert a task-specific cell, run it, repair once on an error receipt, then report."""
+    result = _result(messages)
+    title = _task_title(messages)
+    if result is None:
+        return _call('insert_code_cell', f'I will add a cell for "{title or "this task"}".',
+                     {'source': task_code(title), 'explanation': f'Code for the task: {title or "assigned task"}'[:2000]})
+    tool = _last_tool(messages)
+    data = result.get('data') or {}
+    if tool in ('insert_code_cell', 'replace_cell_source'):
+        if result.get('status', 'ok') != 'ok' or not data.get('cell_id'):
+            return ModelResponse(content=coding_report(result, 'cell edit'), finish_reason='stop')
+        return _call('execute_cell', 'Proposing to run the cell.', {'cell_id': data['cell_id'], 'explanation': 'Run the new cell'})
+    if tool == 'execute_cell':
+        if result.get('status') == 'ok':
+            return ModelResponse(content='I added the cell and ran it; the receipt output is quoted below.', finish_reason='stop')
+        if data.get('state') == 'applied' and data.get('status') == 'error' and not _calls_made(messages, 'replace_cell_source'):
+            return _call('replace_cell_source', 'The run failed; proposing one repair of the same cell.', {
+                'cell_id': data['cell_id'], 'source': '# Repaired after an error receipt\n' + task_code(title),
+                'explanation': 'Repair after the failed run'})
+        if data.get('state') == 'applied':
+            return ModelResponse(content='The cell ran but failed; I stopped after one repair. The receipt is quoted below.', finish_reason='stop')
+        return ModelResponse(content=coding_report(result, 'run'), finish_reason='stop')
+    return ModelResponse(content=coding_report(result, 'action'), finish_reason='stop')
+
+
+def _ready_task(roadmap):
+    tasks = {t['task_id']: t for t in (roadmap or {}).get('tasks') or []}
+    return next((t for t in tasks.values() if t['status'] in ('pending', 'blocked', 'needs_input')
+                 and all(tasks.get(d, {}).get('status') == 'completed' for d in t['dependencies'])), None)
+
+
 def notebook_turn(messages, available):
     text, context = owner_message(messages), _context(messages)
     standalone = 'Project: none' in _unfenced(context)
@@ -360,6 +451,13 @@ def notebook_turn(messages, available):
         return kickoff_turn(messages, available, text, context, standalone)
     answering = (not standalone and 'propose_roadmap' in available and not STATUS.search(text)
                  and open_questions(context))
+    if not answering and _result(messages) is None and ASSIGN.search(text) and 'delegate_task' in available and not standalone:
+        found, roadmap = _roadmap_from_context(context)
+        task = _ready_task(roadmap) if found else None
+        if task is None:
+            return ModelResponse(finish_reason='stop', content='No roadmap task is ready to assign: each needs its dependencies completed first.')
+        return _call('delegate_task', f"I propose assigning \"{task['title']}\" to the Coding Agent. Please review; nothing starts until you approve.",
+                     {'task_id': task['task_id'], 'instructions': f"Complete \"{task['title']}\" and meet its acceptance criteria."})
     result = _result(messages)
     if result is not None:
         tool = _last_tool(messages)
@@ -410,6 +508,8 @@ class DemoProvider(Provider):
     label = LABEL
 
     async def complete(self, messages, tools, *, max_tokens):
+        if CODING_ROLE in _system(messages):
+            return coding_turn(messages)
         if NOTEBOOK_ROLE in _system(messages):
             return notebook_turn(messages, {t['name'] for t in tools})
         result = _result(messages)
