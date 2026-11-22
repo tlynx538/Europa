@@ -134,6 +134,23 @@ way** under load.
 the target notebook (bounded polling of the authoritative state) instead of a fixed 5 s UI
 wait, and failure capture should page through all sessions.
 
+**Resolved by `fix/dashboard-starting-state` (2026-11-19).** A diagnostic dump at a
+reproduced failure showed the API itself reporting `Starting`: the notebook's only owned
+kernel had an `applied` receipt on that kernel, runtime and generation, `connections: 0`, and
+no busy or active execution, yet the Gateway model kept `execution_state: "starting"` (a
+missed status message; not an extra unused kernel). The dashboard now reports such a kernel
+as `Idle` ("Owned kernel completed a verified execution; Gateway state is stale") only when a
+completed receipt (`applied` or `conflict`, both written after `GatewayClient.execute` saw the
+execute reply and the idle status) exists for the same kernel, runtime and generation; new,
+busy and actively executing kernels are unchanged (regression test
+`tests/test_dashboard.py::test_stale_gateway_starting_after_verified_completed_execution_is_idle`).
+The Running tests now wait on the paged sessions API (settled states up to 30 s; `Busy`
+confirmed while the cell is still running), save every page on timeout, and refresh with the
+dashboard's Refresh button instead of reloading. Three full Phase 3 Chrome runs at load
+5.9–8.0 passed (56 passed, 1 skipped each). Remaining: a kernel started only through
+`/api/kernel/start` has no receipt and can still show `Starting` if its status messages are
+missed.
+
 After each Phase 3 run the regenerated `docs/screenshots/phase3h/` captures (and 4B/4C
 captures after agent runs) were restored with `git checkout`.
 

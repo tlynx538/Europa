@@ -236,6 +236,19 @@ class DashboardObservation:
             return state('Stopped', 'Verified Gateway inventory contains no kernels')
         if all(m.get('execution_state') == 'idle' for m in models):
             return state('Idle', 'All verified owned kernels report idle', activity)
+        # Jupyter Server only leaves 'starting' when its IOPub activity monitor sees a
+        # status message; under load it can miss them and report 'starting' forever.
+        # GatewayClient.execute returns only after the execute_reply AND the matching
+        # iopub idle status, and only then is a receipt applied/conflict. So a terminal
+        # receipt bound to this kernel, runtime and generation proves the kernel was
+        # ready and returned to idle. Nothing can have made it busy since: Europa is the
+        # kernel's only client, no execution task is active and no kernel operation is
+        # in flight (both checked above). Kernels without such a receipt stay Starting.
+        def completed(model):
+            return any(r['state'] in {'applied', 'conflict'} and r['kernel_id'] == model.get('id') and
+                       r['runtime_id'] == identity and r['generation'] == handle.generation for r in receipts)
+        if all(m.get('execution_state') == 'idle' or (m.get('execution_state') == 'starting' and completed(m)) for m in models):
+            return state('Idle', 'Owned kernel completed a verified execution; Gateway state is stale', activity)
         if any(m.get('execution_state') == 'starting' for m in models):
             return state('Starting', 'Verified Gateway kernel reports starting', activity)
         return state('Unknown', 'Gateway did not provide a recognized execution state', activity)

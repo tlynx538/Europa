@@ -331,3 +331,49 @@ async def test_execution_owner_lost_during_gateway_read_cannot_become_idle(dashb
     finally:
         release.set(); task.cancel()
         await asyncio.gather(task, observing, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_stale_gateway_starting_after_verified_completed_execution_is_idle(dashboard):
+    # Observed under load (Phase 4D Stage 0): the only owned kernel had an applied
+    # receipt for this runtime/generation, no active execution, yet the Gateway
+    # inventory kept reporting execution_state 'starting' indefinitely.
+    app, root, store, journal = dashboard
+    nid = seed(dashboard)
+    client, handle = live(app, nid, 'starting')
+    # A kernel without verified completed work is genuinely starting.
+    assert (await sessions(app))['items'][0]['state'] == 'Starting'
+    document = store.edit_cell(nid, 1, 'insert', text='print(123)')
+    stale, _ = store.begin(nid, document['cells'][0]['id'], 2)
+    store.update_execution(nid, stale['execution_id'], runtime_id=handle.runtime_id, generation=0, kernel_id='kernel')
+    store.finish(nid, stale['execution_id'], {'status': 'ok', 'outputs': [], 'execution_count': 1})
+    # Completion on an earlier generation proves nothing about this kernel.
+    assert (await sessions(app))['items'][0]['state'] == 'Starting'
+    current = store.open(nid)
+    receipt, _ = store.begin(nid, current['cells'][0]['id'], current['metadata']['europa']['revision'])
+    store.update_execution(nid, receipt['execution_id'], runtime_id=handle.runtime_id, generation=1, kernel_id='kernel')
+    store.finish(nid, receipt['execution_id'], {'status': 'ok', 'outputs': [], 'execution_count': 2})
+    assert store.execution(nid, receipt['execution_id'])['state'] == 'applied'
+    result = (await sessions(app))['items'][0]
+    assert result['state'] == 'Idle'
+    assert result['reason'] == 'Owned kernel completed a verified execution; Gateway state is stale'
+    # A second owned kernel with no verified completion keeps the row Starting.
+    original = client.list_kernels
+    async def two():
+        return await original() + [{'id': 'fresh', 'name': 'python3', 'execution_state': 'starting', 'last_activity': '2026-11-10T16:00:00Z'}]
+    client.list_kernels = two
+    client._owned.add('fresh')
+    assert (await sessions(app))['items'][0]['state'] == 'Starting'
+    client.list_kernels = original
+    client._owned.discard('fresh')
+    # An operation in flight on the kernel (e.g. restart) is never reported Idle.
+    client._busy.add('kernel')
+    assert (await sessions(app))['items'][0]['state'] == 'Unknown'
+    client._busy.clear()
+    # An accepted execution in progress is never reported Idle.
+    task = asyncio.create_task(asyncio.Event().wait())
+    app.state.notebook_service.tasks[nid] = task
+    try:
+        assert (await sessions(app))['items'][0]['state'] == 'Starting'
+    finally:
+        task.cancel(); await asyncio.gather(task, return_exceptions=True)
